@@ -1,0 +1,96 @@
+{
+    "root": true,
+    "settings": {
+        "import/resolver": {
+            "node": {
+                "extensions": [".js", ".mjs", ".cjs"],
+                "paths": [],
+                "moduleDirectory": ["node_modules"]
+            }
+        }
+    },
+    "extends": [
+        "standard"
+    ],
+    "parser": "@babel/eslint-parser",
+    "parserOptions": {
+        "ecmaVersion": 2021,
+        "sourceType": "module",
+        "requireConfigFile": false,
+        "babelOptions": {
+            "parserOpts": {
+                "allowAwaitOutsideFunction": true,
+                "plugins": [
+                    "estree",
+                    "topLevelAwait",
+                    "asyncGenerators",
+                    "classPrivateMethods",
+                    "classPrivateProperties",
+                    "classProperties",
+                    "classStaticBlock",
+                    "exportDefaultFrom",
+                    "importMeta",
+                    "logicalAssignment",
+                    "nullishCoalescingOperator",
+                    "objectRestSpread",
+                    "optionalCatchBinding",
+                    "optionalChaining"
+                ]
+            }
+        }
+    },
+    "env": {
+        "es6": true,
+        "node": true
+    },
+    "globals": {
+        "globalThis": "readonly"
+    },
+    "rules": {
+        "indent": [
+            "error",
+            4
+        ],
+        "quotes": [
+            "warn",
+            "single",
+            {
+                "avoidEscape": true,
+                "allowTemplateLiterals": true
+            }
+        ],
+        "no-unused-vars": [
+            "warn"
+        ],
+        "keyword-spacing": [
+            "error"
+        ],
+        "space-before-function-paren": [
+            "error",
+            {
+                "anonymous": "always",
+                "named": "never",
+                "asyncArrow": "always"
+            }
+        ],
+        "eqeqeq": [
+            "warn",
+            "always",
+            {
+                "null": "ignore"
+            }
+        ],
+        "semi": [
+            "error",
+            "always"
+        ],
+        "no-new-func": "off",
+        "no-mixed-operators": "off",
+        "no-return-assign": "off",
+        "no-debugger": "off",
+        "no-labels": "off",
+        "no-void": "off",
+        "camelcase": "off",
+        "node/handle-callback-err": "off"
+    }
+}
