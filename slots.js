@@ -1,16 +1,22 @@
 export default {
     autoAllocateChunkSize: Symbol('autoAllocateChunkSize'),
+    backpressure: Symbol('backpressure'),
     byobRequest: Symbol('byobRequest'),
     cancelAlgorithm: Symbol('cancelAlgorithm'),
     cancelSteps: Symbol('cancelSteps'),
+    closeRequest: Symbol('closeRequest'),
     closeRequested: Symbol('closeRequested'),
     closedDefer: Symbol('closedDefer'),
     controller: Symbol('controller'),
     detached: Symbol('detached'),
     disturbed: Symbol('disturbed'),
+    inFlightWriteRequest: Symbol('inFlightWriteRequest'),
+    inFlightCloseRequest: Symbol('inFlightCloseRequest'),
+    pendingAbortRequest: Symbol('pendingAbortRequest'),
     pendingPullIntos: Symbol('pendingPullIntos'),
     pullAgain: Symbol('pullAgain'),
     pullAlgorithm: Symbol('pullAlgorithm'),
+    pullSteps: Symbol('pullSteps'),
     pulling: Symbol('pulling'),
     queue: Symbol('queue'),
     queueTotalSize: Symbol('queueTotalSize'),
@@ -21,6 +27,9 @@ export default {
     storedError: Symbol('storedError'),
     started: Symbol('started'),
     strategyHWM: Symbol('strategyHWM'),
+    strategySizeAlgorithm: Symbol('strategySizeAlgorithm'),
     stream: Symbol('stream'),
-    view: Symbol('view')
+    view: Symbol('view'),
+    writer: Symbol('writer'),
+    writeRequests: Symbol('writeRequests')
 };
