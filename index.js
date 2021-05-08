@@ -218,6 +218,23 @@ export class ReadableStreamBYOBReader {
 }
 
 export class ReadableStreamDefaultController {
+    get desiredSize() {
+        return spec.readableStreamDefaultControllerGetDesiredSize(this);
+    }
+
+    close() {
+        if (!spec.readableStreamDefaultControllerCanCloseOrEnqueue(this)) {
+            throw new TypeError(`Failed to execute 'close' on 'ReadableStreamDefaultController': Cannot close a readable stream that has already been requested to be closed`);
+        }
+        spec.readableStreamDefaultControllerClose(this);
+    }
+
+    enqueue(chunk) {
+        if (!spec.readableStreamDefaultControllerCanCloseOrEnqueue(this)) {
+            throw new TypeError(`Failed to execute 'close' on 'ReadableStreamDefaultController': Cannot enqueue a chunk into a readable stream that has already been requested to be closed`);
+        }
+        spec.readableStreamDefaultControllerEnqueue(this, chunk);
+    }
 }
 
 export class ReadableByteStreamController {

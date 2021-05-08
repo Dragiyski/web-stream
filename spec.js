@@ -34,6 +34,14 @@ export default {
         this.setUpReadableStreamDefaultReader(stream, reader);
         return reader;
     },
+    enqueueValueWithSize(container, value, size) {
+        assert?.(slots.queue in container && slots.queueTotalSize in container);
+        if (!isFinite(size)) {
+            throw RangeError(`The return value of a queuing strategy's size function must be a finite, non-NaN, non-negative number`);
+        }
+        container[slots.queue].push({ value, size });
+        container[slots.queueTotalSize] += size;
+    },
     extractHighWaterMark(strategy, defaultHWM) {
         if (strategy.highWaterMark == null) {
             return defaultHWM;
@@ -197,6 +205,17 @@ export default {
         this.readableByteStreamControllerInvalidateBYOBRequest(controller);
         controller[slots.pendingPullIntos] = [];
     },
+    readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor) {
+        const bytesFilled = pullIntoDescriptor.bytesFilled;
+        const elementSize = pullIntoDescriptor.elementSize;
+        assert?.(pullIntoDescriptor.bytesFilled <= pullIntoDescriptor.byteLength);
+        assert?.(bytesFilled & elementSize === 0);
+        // Here we cannot use the pullIntoDescriptor data as intended, but the general idea is to create a view
+        // for the existing buffer, with the same type as the provided view, which is only possible for aligned elements.
+        // To do this, we need to compute the aligned byte elements first:
+        const byteLength = bytesFilled - bytesFilled % elementSize; // Equivalen of Math.floor(bytesFilled / elementSize) * elementSize;
+        return new pullIntoDescriptor.ViewConstructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, byteLength);
+    },
     readableByteStreamControllerError(controller, e) {
         const stream = controller[slots.stream];
         if (stream[slots.state] !== 'readable') {
@@ -254,8 +273,8 @@ export default {
             ready
                 ? true
                 : controller[slots.queueTotalSize] === 0 &&
-             pullIntoDescriptor.bytesFilled > 0 &&
-             pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize
+                pullIntoDescriptor.bytesFilled > 0 &&
+                pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize
         );
         return ready;
     },
@@ -339,6 +358,65 @@ export default {
             reader[slots.readRequests] = [];
         }
     },
+    readableStreamDefaultControllerCanCloseOrEnqueue(controller) {
+        const state = controller[slots.stream][slots.state];
+        return !controller[slots.closeRequested] && state === 'readable';
+    },
+    readableStreamDefaultControllerClearAlgorithms(controller) {
+        controller[slots.pullAlgorithm] = null;
+        controller[slots.cancelAlgorithm] = null;
+        controller[slots.strategySizeAlgorithm] = null;
+    },
+    readableStreamDefaultControllerClose(controller) {
+        if (!this.readableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return;
+        }
+        const stream = controller[slots.stream];
+        controller[slots.closeRequested] = true;
+        if (controller[slots.queue].length <= 0) {
+            this.readableStreamDefaultControllerClearAlgorithms(controller);
+            this.readableStreamClose(stream);
+        }
+    },
+    readableStreamDefaultControllerEnqueue(controller, chunk) {
+        if (!this.readableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return;
+        }
+        const stream = controller[slots.stream];
+        if (this.isReadableStreamLocked(stream) && this.readableStreamGetNumReadRequests(stream) > 0) {
+            this.readableStreamFulfillReadRequest(stream, chunk, false);
+        } else {
+            const chunkSize = (() => {
+                try {
+                    return controller[slots.strategySizeAlgorithm]();
+                } catch (error) {
+                    this.readableStreamDefaultControllerError(controller, error);
+                    throw error; // Errors caught in the sizeAlgorithm user-provided function
+                    // must be caught and result in an errored stream with that error.
+                    // However, they must also propagate back to the underlying source.
+                    // For example, if we have a NodeJS stream and this stream, error in sizeAlgorithm
+                    // will make this stream fail, but it is up to the underlying source to make the NodeJS stream fail.
+                }
+            })();
+            try {
+                this.enqueueValueWithSize(controller, chunk, chunkSize);
+            } catch (error) {
+                this.readableStreamDefaultControllerError(controller, error);
+                throw error;
+            }
+            this.readableStreamDefaultControllerCallPullIfNeeded(controller);
+        }
+    },
+    readableStreamDefaultControllerGetDesiredSize(controller) {
+        const state = controller[slots.stream][slots.state];
+        if (state === 'errored') {
+            return null;
+        }
+        if (state === 'closed') {
+            return 0;
+        }
+        return controller[slots.strategyHWM] - controller[slots.queueTotalSize];
+    },
     readableStreamDefaultReaderRead(reader, readRequest) {
         const stream = reader[slots.stream];
         assert?.(stream != null);
@@ -405,10 +483,10 @@ export default {
         assert?.(typeof preventCancel === 'boolean');
         assert?.(
             signal == null ||
-        typeof signal === 'object' &&
-        'aborted' in signal &&
-        typeof signal.addEventListener === 'function' &&
-        typeof signal.removeEventListener === 'function'
+            typeof signal === 'object' &&
+            'aborted' in signal &&
+            typeof signal.addEventListener === 'function' &&
+            typeof signal.removeEventListener === 'function'
         );
         assert?.(!this.isReadableStreamLocked(source));
         assert?.(!this.isWritableStreamLocked(dest));
@@ -450,17 +528,26 @@ export default {
             signal.addEventListener('abort', abortAlgorithm, { once: true });
         }
         /* The following step is not clearly described in the standard, intentionally. Instead, it is up to the agent
-     * (current code) to decide how to process it. However, a few guidelines must be followed:
-     * - We should never call any stream/reader/writer public API (non-slot symbols); We can still call the
-     * undelying source/sink API though.
-     * - Operation must be done in a parallel, we should not "await", but rather start as many jobs as we need
-     * until we pass the watermark for the destination. Of course, individual reads must not be parallel, a
-     * stream must fully read a chunk before continue with the next. The pipe allows the readable stream to
-     * continue even when the pipe is in high watermark state.
-     * - Only backpressure should stop further processing on read chunks.
-     */
+        * (current code) to decide how to process it. However, a few guidelines must be followed:
+        * - We should never call any stream/reader/writer public API (non-slot symbols); We can still call the
+        * undelying source/sink API though.
+        * - Operation must be done in a parallel, we should not "await", but rather start as many jobs as we need
+        * until we pass the watermark for the destination. Of course, individual reads must not be parallel, a
+        * stream must fully read a chunk before continue with the next. The pipe allows the readable stream to
+        * continue even when the pipe is in high watermark state.
+        * - Only backpressure should stop further processing on read chunks.
+        */
         // TODO: Perform read/writes in parallel here. To stop the stream we should use shutdown which will call
         // finalize, which will resolve/reject the promise.
+
+        // Processing: The processing should be as follows: Using 'reader' we read chunks and write them to the 'writer'.
+        // (Note, 'reader' and 'writer' belongs to different streams here).
+        // If this.writableStreamDefaultWriterGetDesiredSize(writer) <= 0 or null, we stop reading until the value returns
+        // to > 0 (back-pressure).
+        // Reading is a promise operation, so it might take some time for information to be received.
+        // If at any time source[slots.state] changes to 'errored' / 'closed', the propagation of errors is dictated by
+        // preventAbort, preventClose, preventCancel arguments. If some of those are true, error/close in one of the stream
+        // will prevent error/close in another. This comes from options argument supplied by the user.
 
         return defer.promise;
     },
@@ -491,7 +578,7 @@ export default {
             reader[slots.stream][slots.closedDefer] = {};
             reader[slots.stream][slots.closedDefer].promise = Promise.reject(new TypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`));
         }
-        reader[slots.stream][slots.closedDefer].promise.catch(() => {}); // [[PromiseIsHandled]] = true
+        reader[slots.stream][slots.closedDefer].promise.catch(() => { }); // [[PromiseIsHandled]] = true
         reader[slots.stream][slots.reader] = null;
         reader[slots.stream] = null;
     },
@@ -527,9 +614,9 @@ export default {
     },
     setUpReadableByteStreamControllerFromUnderlyingSource(stream, underlyingSource, underlyingSourceDict, highWaterMark) {
         const controller = Object.create(ReadableByteStreamController.prototype);
-        let startAlgorithm = () => {};
-        let pullAlgorithm = async () => {};
-        let cancelAlgorithm = async () => {};
+        let startAlgorithm = () => { };
+        let pullAlgorithm = async () => { };
+        let cancelAlgorithm = async () => { };
         if (underlyingSourceDict.start != null) {
             startAlgorithm = controller => underlyingSourceDict.start.call(underlyingSource, controller);
         }
@@ -586,9 +673,9 @@ export default {
     },
     setUpReadableStreamDefaultControllerFromUnderlyingSource(stream, underlyingSource, underlyingSourceDict, highWaterMark, sizeAlgorithm) {
         const controller = Object.create(ReadableStreamDefaultController.prototype);
-        let startAlgorithm = () => {};
-        let pullAlgorithm = async () => {};
-        let cancelAlgorithm = async () => {};
+        let startAlgorithm = () => { };
+        let pullAlgorithm = async () => { };
+        let cancelAlgorithm = async () => { };
         if (underlyingSourceDict.start != null) {
             startAlgorithm = controller => underlyingSourceDict.start.call(underlyingSource, controller);
         }
