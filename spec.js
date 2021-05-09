@@ -34,6 +34,20 @@ export default {
         this.setUpReadableStreamDefaultReader(stream, reader);
         return reader;
     },
+    createReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark = 1, sizeAlgorithm = () => 1) {
+        if (highWaterMark == null) {
+            highWaterMark = 1;
+        }
+        if (sizeAlgorithm == null) {
+            sizeAlgorithm = () => 1;
+        }
+        assert?.(Number.isSafeInteger(highWaterMark) && highWaterMark >= 0);
+        const stream = Object.create(ReadableStream.prototype);
+        this.initializeReadableStream(stream);
+        const controller = Object.create(ReadableStreamDefaultController.prototype);
+        this.setUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, sizeAlgorithm);
+        return stream;
+    },
     dequeueValue(container) {
         assert?.(slots.queue in container && slots.queueTotalSize in container);
         assert?.(container[slots.queue].length > 0);
@@ -136,74 +150,8 @@ export default {
             this.readableByteStreamControllerError(controller, e);
         });
     },
-    readableByteStreamControllerPullInto(controller, view, readIntoRequest) {
-        const stream = controller[slots.stream];
-        let elementSize = 1;
-        let ArrayBufferView = DataView;
-        if (!(view instanceof DataView)) {
-            assert?.(Number.isSafeInteger(view.BYTES_PER_ELEMENT));
-            elementSize = view.BYTES_PER_ELEMENT;
-            let v = Object.getPrototypeOf(view);
-            do {
-                if (typedArrayTable.has(v)) {
-                    ArrayBufferView = typedArrayTable.get(v);
-                    break;
-                }
-                v = Object.getPrototypeOf(v);
-            } while (v != null);
-        }
-        const byteOffset = view.byteOffset;
-        const byteLength = view.byteLength;
-        // Here the standard asks for direct access to ECMAScript internal slots which allows creationg
-        // of new ArrayBuffer object with the same data, where the internal buffer is not copied, but
-        // detached from the previous object.
-        // This cannot be implemented in JavaScript, so we fallback to the fastest method, just assign
-        // the buffer from the view. This buffer sometimes will be shared with more blocks. For example,
-        // node's Buffer.alloc() returns Buffer (subclass of Uint8Array) whose ArrayBuffer might be shared
-        // with previous call to node's Buffer.alloc() minimizing the amount of actual memory allocation.
-        // Therefore, this could keep larger block of memory alive.
-        const buffer = view.buffer;
-        const pullIntoDescriptor = {
-            buffer,
-            byteOffset,
-            byteLength,
-            bytesFilled: 0,
-            elementSize,
-            ViewConstructor: ArrayBufferView,
-            readerType: 'byob'
-        };
-        if (view instanceof DataView) {
-            pullIntoDescriptor.ByteConstructor = Uint8Array;
-        } else {
-            pullIntoDescriptor.ByteConstructor = pullIntoDescriptor.ViewConstructor;
-        }
-        if (controller[slots.pendingPullIntos].length > 0) {
-            controller[slots.pendingPullIntos].push(pullIntoDescriptor);
-            this.readableStreamAddReadIntoRequest(stream, readIntoRequest);
-            return;
-        }
-        if (stream[slots.state] === 'closed') {
-            const emptyView = new ArrayBufferView(new ArrayBuffer(0));
-            readIntoRequest.closeSteps(emptyView);
-            return;
-        }
-        if (controller[slots.queueTotalSize] > 0) {
-            if (this.readableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor)) {
-                const filledView = this.readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
-                this.readableByteStreamControllerHandleQueueDrain(controller);
-                readIntoRequest.chunkSteps(filledView);
-                return;
-            }
-            if (controller[slots.closeRequested]) {
-                const e = new TypeError('The controller close() is called before the current pull');
-                this.readableByteStreamControllerError(controller, e);
-                readIntoRequest.errorSteps(e);
-                return;
-            }
-        }
-        controller[slots.pendingPullIntos].push(pullIntoDescriptor);
-        this.readableStreamAddReadIntoRequest(stream, readIntoRequest);
-        this.readableByteStreamControllerCallPullIfNeeded(controller);
+    readableByteStreamControllerCanCloseOrEnqueue(controller) {
+        return !controller[slots.closeRequested] && controller[slots.stream][slots.state] === 'readable';
     },
     readableByteStreamControllerClearAlgorithms(controller) {
         controller[slots.pullAlgorithm] = null;
@@ -212,6 +160,26 @@ export default {
     readableByteStreamControllerClearPendingPullIntos(controller) {
         this.readableByteStreamControllerInvalidateBYOBRequest(controller);
         controller[slots.pendingPullIntos] = [];
+    },
+    readableByteStreamControllerClose(controller) {
+        const stream = controller[slots.stream];
+        if (controller[slots.closeRequested] || stream[slots.state] !== 'readable') {
+            return;
+        }
+        if (controller[slots.queueTotalSize] > 0) {
+            controller[slots.closeRequested] = true;
+            return;
+        }
+        if (controller[slots.pendingPullIntos].length > 0) {
+            const firstPendingPullInto = controller[slots.pendingPullIntos][0];
+            if (firstPendingPullInto.bytesFilled > 0) {
+                const e = new TypeError('There are outstanding read requests');
+                this.readableByteStreamControllerError(controller, e);
+                throw e;
+            }
+            this.readableByteStreamControllerClearAlgorithms(controller);
+            this.readableStreamClose(stream);
+        }
     },
     readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor) {
         const bytesFilled = pullIntoDescriptor.bytesFilled;
@@ -223,6 +191,51 @@ export default {
         // To do this, we need to compute the aligned byte elements first:
         const byteLength = bytesFilled - bytesFilled % elementSize; // Equivalen of Math.floor(bytesFilled / elementSize) * elementSize;
         return new pullIntoDescriptor.ViewConstructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, byteLength);
+    },
+    readableByteStreamControllerCommitPullIntoDescriptor(stream, pullIntoDescriptor) {
+        assert?.(stream[slots.state] !== 'errored');
+        let done = false;
+        if (stream[slots.state] === 'closed') {
+            assert?.(pullIntoDescriptor.bytesFilled === 0);
+            done = true;
+        }
+        const filledView = this.readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
+        if (pullIntoDescriptor.readerType === 'default') {
+            this.readableStreamFulfillReadRequest(stream, filledView, done);
+        } else {
+            assert(pullIntoDescriptor.readerType === 'byob');
+            this.readableStreamFulfillReadIntoRequest(stream, filledView, done);
+        }
+    },
+    readableByteStreamControllerEnqueue(controller, chunk) {
+        if (!this.readableByteStreamControllerCanCloseOrEnqueue(controller)) {
+            return;
+        }
+        const buffer = chunk.buffer;
+        const byteOffset = chunk.byteOffset;
+        const byteLength = chunk.byteLength;
+        const transferredBuffer = this.transferArrayBuffer(buffer);
+        const stream = controller[slots.stream];
+        if (this.readableStreamHasDefaultReader(stream)) {
+            if (this.readableStreamGetNumReadRequests(stream) === 0) {
+                this.readableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+            } else {
+                assert?.(controller[slots.queue].length > 0);
+                const transferredView = new Uint8Array(transferredBuffer, byteOffset, byteLength);
+                this.readableStreamFulfillReadRequest(stream, transferredView, false);
+            }
+        } else if (this.readableStreamHasBYOBReader(stream)) {
+            this.readableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+            this.readableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller);
+        } else {
+            assert?.(!this.isReadableStreamLocked(stream));
+            this.readableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+        }
+        this.readableByteStreamControllerCallPullIfNeeded(controller);
+    },
+    readableByteStreamControllerEnqueueChunkToQueue(controller, buffer, byteOffset, byteLength) {
+        controller[slots.queue]({ buffer, byteOffset, byteLength });
+        controller[slots.queueTotalSize] += byteLength;
     },
     readableByteStreamControllerError(controller, e) {
         const stream = controller[slots.stream];
@@ -296,6 +309,15 @@ export default {
         }
         return controller[slots.strategyHWM] - controller[slots.queueTotalSize];
     },
+    readableByteStreamControllerHandleQueueDrain(controller) {
+        assert?.(controller[slots.stream][slots.state] === 'readable');
+        if (controller[slots.queueTotalSize] === 0 && controller[slots.closeRequested]) {
+            this.readableByteStreamControllerClearAlgorithms(controller);
+            this.readableStreamClose(controller[slots.stream]);
+        } else {
+            this.readableByteStreamControllerCallPullIfNeeded(controller);
+        }
+    },
     readableByteStreamControllerInvalidateBYOBRequest(controller) {
         if (controller[slots.byobRequest] == null) {
             return;
@@ -303,6 +325,146 @@ export default {
         controller[slots.byobRequest][slots.controller] = null;
         controller[slots.byobRequest][slots.view] = null;
         controller[slots.byobRequest] = null;
+    },
+    readableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller) {
+        assert?.(controller[slots.closeRequested] === false);
+        while (controller[slots.pendingPullIntos].length > 0) {
+            if (controller[slots.queueTotalSize] === 0) {
+                return;
+            }
+            const pullIntoDescriptor = controller[slots.pendingPullIntos][0];
+            if (this.readableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor)) {
+                this.readableByteStreamControllerShiftPendingPullInto(controller);
+                this.readableByteStreamControllerCommitPullIntoDescriptor(controller[slots.stream], pullIntoDescriptor);
+            }
+        }
+    },
+    readableByteStreamControllerPullInto(controller, view, readIntoRequest) {
+        const stream = controller[slots.stream];
+        let elementSize = 1;
+        let ArrayBufferView = DataView;
+        if (!(view instanceof DataView)) {
+            assert?.(Number.isSafeInteger(view.BYTES_PER_ELEMENT));
+            elementSize = view.BYTES_PER_ELEMENT;
+            let v = Object.getPrototypeOf(view);
+            do {
+                if (typedArrayTable.has(v)) {
+                    ArrayBufferView = typedArrayTable.get(v);
+                    break;
+                }
+                v = Object.getPrototypeOf(v);
+            } while (v != null);
+        }
+        const byteOffset = view.byteOffset;
+        const byteLength = view.byteLength;
+        const buffer = this.transferArrayBuffer(view.buffer);
+        const pullIntoDescriptor = {
+            buffer,
+            byteOffset,
+            byteLength,
+            bytesFilled: 0,
+            elementSize,
+            ViewConstructor: ArrayBufferView,
+            readerType: 'byob'
+        };
+        if (view instanceof DataView) {
+            pullIntoDescriptor.ByteConstructor = Uint8Array;
+        } else {
+            pullIntoDescriptor.ByteConstructor = pullIntoDescriptor.ViewConstructor;
+        }
+        if (controller[slots.pendingPullIntos].length > 0) {
+            controller[slots.pendingPullIntos].push(pullIntoDescriptor);
+            this.readableStreamAddReadIntoRequest(stream, readIntoRequest);
+            return;
+        }
+        if (stream[slots.state] === 'closed') {
+            const emptyView = new ArrayBufferView(new ArrayBuffer(0));
+            readIntoRequest.closeSteps(emptyView);
+            return;
+        }
+        if (controller[slots.queueTotalSize] > 0) {
+            if (this.readableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor)) {
+                const filledView = this.readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
+                this.readableByteStreamControllerHandleQueueDrain(controller);
+                readIntoRequest.chunkSteps(filledView);
+                return;
+            }
+            if (controller[slots.closeRequested]) {
+                const e = new TypeError('The controller close() is called before the current pull');
+                this.readableByteStreamControllerError(controller, e);
+                readIntoRequest.errorSteps(e);
+                return;
+            }
+        }
+        controller[slots.pendingPullIntos].push(pullIntoDescriptor);
+        this.readableStreamAddReadIntoRequest(stream, readIntoRequest);
+        this.readableByteStreamControllerCallPullIfNeeded(controller);
+    },
+    readableByteStreamControllerRespond(controller, bytesWritten) {
+        assert?.(controller[slots.pendingPullIntos].length > 0);
+        this.readableByteStreamControllerRespondInternal(controller, bytesWritten);
+    },
+    readableByteStreamControllerRespondInClosedState(controller, firstDescriptor) {
+        firstDescriptor.buffer = this.transferArrayBuffer(firstDescriptor.buffer);
+        assert?.(firstDescriptor.bytesFilled === 0);
+        const stream = controller[slots.stream];
+        if (this.readableStreamHasDefaultReader(stream)) {
+            while (this.readableStreamGetNumReadIntoRequests(stream) > 0) {
+                const pullIntoDescriptor = this.readableByteStreamControllerShiftPendingPullInto(controller);
+                this.readableByteStreamControllerCommitPullIntoDescriptor(stream, pullIntoDescriptor);
+            }
+        }
+    },
+    readableByteStreamControllerRespondInReadableState(controller, bytesWritten, pullIntoDescriptor) {
+        if (pullIntoDescriptor.bytesFilled + bytesWritten > pullIntoDescriptor.byteLength) {
+            throw new RangeError('response reports bytes outside bounds of BYOB request');
+        }
+        this.readableByteStreamControllerFillHeadPullIntoDescriptor(controller, bytesWritten, pullIntoDescriptor);
+        if (pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize) {
+            return;
+        }
+        this.readableByteStreamControllerShiftPendingPullInto(controller);
+        const remainderSize = pullIntoDescriptor.bytesFilled % pullIntoDescriptor.elementSize;
+        if (remainderSize > 0) {
+            const end = pullIntoDescriptor.byteOffset + pullIntoDescriptor.bytesFilled;
+            const remainder = pullIntoDescriptor.buffer.slice(end - remainderSize, remainderSize);
+            this.readableByteStreamControllerEnqueueChunkToQueue(controller, remainder, 0, remainder.byteLength);
+        }
+        pullIntoDescriptor.buffer = this.transferArrayBuffer(pullIntoDescriptor.buffer);
+        pullIntoDescriptor.bytesFilled -= remainderSize;
+        this.readableByteStreamControllerCommitPullIntoDescriptor(controller[slots.stream], pullIntoDescriptor);
+        this.readableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller);
+    },
+    readableByteStreamControllerRespondInternal(controller, bytesWritten) {
+        const firstDescriptor = controller[slots.pendingPullIntos][0];
+        const state = controller[slots.stream][slots.state];
+        if (state === 'closed') {
+            if (bytesWritten > 0) {
+                throw new TypeError('The stream is already closed');
+            }
+            this.readableByteStreamControllerRespondInClosedState(controller, firstDescriptor);
+        } else {
+            assert?.(state === 'readable');
+            this.readableByteStreamControllerRespondInReadableState(controller, bytesWritten, firstDescriptor);
+        }
+        this.readableByteStreamControllerCallPullIfNeeded(controller);
+    },
+    readableByteStreamControllerRespondWithNewView(controller, view) {
+        assert?.(controller[slots.pendingPullIntos].length > 0);
+        const firstDescriptor = controller[slots.pendingPullIntos][0];
+        if (firstDescriptor.byteOffset + firstDescriptor.bytesFilled !== view.byteOffset) {
+            throw new RangeError(`The view byte offset does not match the range of the request`);
+        }
+        if (firstDescriptor.byteLength !== view.byteLength) {
+            throw new RangeError(`The view byte length does not match the range of the request`);
+        }
+        firstDescriptor.buffer = view.buffer;
+        this.readableByteStreamControllerRespondInternal(controller, view.byteLength);
+    },
+    readableByteStreamControllerShiftPendingPullInto(controller) {
+        const descriptor = controller[slots.pendingPullIntos].shift();
+        this.readableByteStreamControllerInvalidateBYOBRequest(controller);
+        return descriptor;
     },
     readableByteStreamControllerShouldCallPull(controller) {
         const stream = controller[slots.stream];
@@ -325,16 +487,10 @@ export default {
         assert?.(desiredSize != null);
         return desiredSize > 0;
     },
-    async readableStreamCancel(stream, reason) {
-        stream[slots.disturbed] = true;
-        if (stream[slots.state] === 'closed') {
-            return;
-        }
-        if (stream[slots.state] === 'errored') {
-            throw stream[slots.storedError];
-        }
-        this.readableStreamClose(stream);
-        await stream[slots.controller][slots.cancelSteps](reason);
+    readableStreamAddReadRequest(stream, readRequest) {
+        assert?.(stream[slots.reader] instanceof ReadableStreamDefaultReader);
+        assert?.(stream[slots.state] === 'readable');
+        stream[slots.reader][slots.readRequests].push(readRequest);
     },
     readableStreamAddReadIntoRequest(stream, readRequest) {
         assert?.(stream[slots.reader] instanceof ReadableStreamBYOBReader);
@@ -350,6 +506,17 @@ export default {
         } else {
             this.readableByteStreamControllerPullInto(stream[slots.controller], view, readIntoRequest);
         }
+    },
+    async readableStreamCancel(stream, reason) {
+        stream[slots.disturbed] = true;
+        if (stream[slots.state] === 'closed') {
+            return;
+        }
+        if (stream[slots.state] === 'errored') {
+            throw stream[slots.storedError];
+        }
+        this.readableStreamClose(stream);
+        await stream[slots.controller][slots.cancelSteps](reason);
     },
     readableStreamClose(stream) {
         assert?.(stream[slots.state] === 'readable');
@@ -389,8 +556,7 @@ export default {
         });
     },
     readableStreamDefaultControllerCanCloseOrEnqueue(controller) {
-        const state = controller[slots.stream][slots.state];
-        return !controller[slots.closeRequested] && state === 'readable';
+        return !controller[slots.closeRequested] && controller[slots.stream][slots.state] === 'readable';
     },
     readableStreamDefaultControllerClearAlgorithms(controller) {
         controller[slots.pullAlgorithm] = null;
@@ -769,5 +935,8 @@ export default {
         }
         this.readableStreamReaderGenericInitialize(reader, stream);
         reader[slots.readRequests] = [];
+    },
+    transferArrayBuffer(o) {
+        return o;
     }
 };

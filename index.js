@@ -1,3 +1,4 @@
+import { assert } from './assert.js';
 import slots from './slots.js';
 import spec from './spec.js';
 
@@ -10,7 +11,7 @@ export class ReadableStream {
         spec.initializeReadableStream(this);
         if (underlyingSourceDict.type === 'bytes') {
             if (strategy.size != null) {
-                throw new RangeError(`Failed to construct 'ReadableStream': Invalid type is specified`);
+                throw new RangeError(`Invalid type is specified`);
             }
             const highWaterMark = spec.extractHighWaterMark(strategy, 0);
             spec.setUpReadableByteStreamControllerFromUnderlyingSource(this, underlyingSource, underlyingSourceDict, highWaterMark);
@@ -78,7 +79,7 @@ export class ReadableStream {
         }
         const signal = options.signal;
         spec.readableStreamPipeTo(this, transform.writable, !!options.preventClose, !!options.preventAbort, !!options.preventCancel, signal)
-            .then(() => {}, error => {
+            .then(() => { }, error => {
                 console.error(error);
             });
         return transform.readable;
@@ -111,14 +112,14 @@ export class ReadableStream {
 export class ReadableStreamDefaultReader {
     constructor(stream) {
         if (!(stream instanceof ReadableStream)) {
-            throw new TypeError(`Failed to construct 'ReadableStreamDefaultReader': parameter 1 is not of type 'ReadableStream'.`);
+            throw new TypeError(`Parameter 1 is not of type 'ReadableStream'.`);
         }
         spec.setUpReadableStreamDefaultReader(this, stream);
     }
 
     async read() {
         if (this[slots.stream] == null) {
-            throw new TypeError(`Failed to execute 'read' on 'ReadableStreamDefaultReader': Illegal invocation`);
+            throw new TypeError(`Illegal invocation`);
         }
         const defer = {};
         defer.promise = new Promise((resolve, reject) => {
@@ -151,7 +152,7 @@ export class ReadableStreamDefaultReader {
             return;
         }
         if (this[slots.readRequests].length > 0) {
-            throw new TypeError(`Failed to execute 'releaseLock' on 'ReadableStreamDefaultReader': There are outstanding read requests`);
+            throw new TypeError(`There are outstanding read requests`);
         }
         spec.readableStreamReaderGenericRelease(this);
     }
@@ -160,7 +161,7 @@ export class ReadableStreamDefaultReader {
 export class ReadableStreamBYOBReader {
     constructor(stream) {
         if (!(stream instanceof ReadableStream)) {
-            throw new TypeError(`Failed to construct 'ReadableStreamBYOBReader': parameter 1 is not of type 'ReadableStream'.`);
+            throw new TypeError(`Parameter 1 is not of type 'ReadableStream'.`);
         }
         spec.setUpReadableStreamBYOBReader(this, stream);
     }
@@ -170,13 +171,13 @@ export class ReadableStreamBYOBReader {
             view = new DataView(view);
         }
         if (!ArrayBuffer.isView(view)) {
-            throw new TypeError(`Failed to execute 'read' on 'ReadableStreamBYOBReader': parameter 1 is not 'ArrayBufferView'`);
+            throw new TypeError(`Parameter 1 is not 'ArrayBufferView'`);
         }
         if (view.byteLength === 0) {
-            throw new TypeError(`Failed to execute 'read' on 'ReadableStreamBYOBReader': This readable stream reader cannot be used to read as the view has byte length equal to 0`);
+            throw new TypeError(`This readable stream reader cannot be used to read as the view has byte length equal to 0`);
         }
         if (this[slots.stream] == null) {
-            throw new TypeError(`Failed to execute 'read' on 'ReadableStreamBYOBReader': This readable stream reader has been released and cannot be used to read from its previous owner stream`);
+            throw new TypeError(`This readable stream reader has been released and cannot be used to read from its previous owner stream`);
         }
         const defer = {
             this: this
@@ -211,7 +212,7 @@ export class ReadableStreamBYOBReader {
             return;
         }
         if (this[slots.readIntoRequests].length > 0) {
-            throw new TypeError(`Failed to execute 'releaseLock' on 'ReadableStreamBYOBReader': There are outstanding read requests`);
+            throw new TypeError(`There are outstanding read requests`);
         }
         spec.readableStreamReaderGenericRelease(this);
     }
@@ -224,14 +225,14 @@ export class ReadableStreamDefaultController {
 
     close() {
         if (!spec.readableStreamDefaultControllerCanCloseOrEnqueue(this)) {
-            throw new TypeError(`Failed to execute 'close' on 'ReadableStreamDefaultController': Cannot close a readable stream that has already been requested to be closed`);
+            throw new TypeError(`Cannot close a readable stream that has already been requested to be closed`);
         }
         spec.readableStreamDefaultControllerClose(this);
     }
 
     enqueue(chunk) {
         if (!spec.readableStreamDefaultControllerCanCloseOrEnqueue(this)) {
-            throw new TypeError(`Failed to execute 'close' on 'ReadableStreamDefaultController': Cannot enqueue a chunk into a readable stream that has already been requested to be closed`);
+            throw new TypeError(`Cannot enqueue a chunk into a readable stream that has already been requested to be closed`);
         }
         spec.readableStreamDefaultControllerEnqueue(this, chunk);
     }
@@ -266,9 +267,134 @@ export class ReadableStreamDefaultController {
 }
 
 export class ReadableByteStreamController {
+    get byobRequest() {
+        if (this[slots.byobRequest] == null && this[slots.pendingPullIntos].length > 0) {
+            const firstDescriptor = this[slots.pendingPullIntos][0];
+            const view = new Uint8Array(firstDescriptor.buffer, firstDescriptor.byteOffset + firstDescriptor.bytesFilled, firstDescriptor.byteLength - firstDescriptor.bytesFilled);
+            const byobRequest = new ReadableStreamBYOBRequest();
+            byobRequest[slots.controller] = this;
+            byobRequest[slots.view] = view;
+            this[slots.byobRequest] = byobRequest;
+        }
+        return this[slots.byobRequest];
+    }
+
+    get desiredSize() {
+        return spec.readableByteStreamControllerGetDesiredSize(this);
+    }
+
+    close() {
+        if (!spec.readableByteStreamControllerCanCloseOrEnqueue(this)) {
+            throw new TypeError(`Cannot close a readable stream that has already been requested to be closed`);
+        }
+        spec.readableByteStreamControllerClose(this);
+    }
+
+    enqueue(chunk) {
+        if (chunk instanceof ArrayBuffer) {
+            chunk = new Uint8Array(chunk);
+        }
+        if (!ArrayBuffer.isView(chunk)) {
+            throw new TypeError(`Parameter 1 is not an ArrayBufferView`);
+        }
+        if (chunk.byteLength <= 0) {
+            throw new TypeError('chunk is empty');
+        }
+        if (!spec.readableByteStreamControllerCanCloseOrEnqueue(this)) {
+            throw new TypeError(`Cannot close a readable stream that has already been requested to be closed`);
+        }
+        return spec.readableByteStreamControllerEnqueue(this, chunk);
+    }
+
+    error(e) {
+        spec.readableByteStreamControllerError(this, e);
+    }
+
+    [slots.cancelSteps](reason) {
+        if (this[slots.pendingPullIntos].length > 0) {
+            this[slots.pendingPullIntos][0].bytesFilled = 0;
+        }
+        spec.resetQueue(this);
+        const result = this[slots.cancelAlgorithm](this);
+        spec.readableByteStreamControllerClearAlgorithms(this);
+        return result;
+    }
+
+    [slots.pullSteps](readRequest) {
+        const stream = this[slots.stream];
+        assert?.(spec.readableStreamHasDefaultReader(stream));
+        if (this[slots.queueTotalSize] > 0) {
+            assert?.(spec.readableStreamGetNumReadRequests(stream) === 0);
+            const entry = this[slots.queue].shift();
+            this[slots.queueTotalSize] -= entry.byteLength;
+            this.readableByteStreamControllerHandleQueueDrain(this);
+            const view = new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength);
+            readRequest.chunkSteps(view);
+            return;
+        }
+        const autoAllocateChunkSize = this[slots.autoAllocateChunkSize];
+        if (autoAllocateChunkSize != null) {
+            assert?.(Number.isSafeInteger(autoAllocateChunkSize) && autoAllocateChunkSize >= 0);
+            let buffer;
+            try {
+                buffer = new ArrayBuffer(autoAllocateChunkSize);
+            } catch (error) {
+                readRequest.errorSteps(error);
+                return;
+            }
+            const pullIntoDescriptor = {
+                buffer,
+                byteOffset: 0,
+                byteLength: autoAllocateChunkSize,
+                bytesFilled: 0,
+                elementSize: 1,
+                ViewConstructor: Uint8Array,
+                ByteConstructor: Uint8Array,
+                readerType: 'default'
+            };
+            this[slots.pendingPullIntos].push(pullIntoDescriptor);
+        }
+        spec.readableStreamAddReadRequest(stream, readRequest);
+        spec.readableByteStreamControllerCallPullIfNeeded(this);
+    }
 }
 
 export class ReadableStreamBYOBRequest {
+    get view() {
+        return this[slots.view];
+    }
+
+    respond(bytesWritten) {
+        if (!Number.isSafeInteger(bytesWritten) || bytesWritten < 0) {
+            throw new TypeError('Parameter 1 is not a non-negative integer');
+        }
+        if (this[slots.controller] == null) {
+            throw new TypeError('The BYOB Request has already been invalidated');
+        }
+        if (this[slots.view].byteLength <= 0) {
+            // This is equivalent of IsDeatchedBuffer(...) but without accessing the internal slots;
+            // By default, we won't detach the buffer in pure NodeJS implementation (since we cannot access internal slots);
+            // We also do not copy the buffer, because this is slow. We trust that the user code won't do anything malicious.
+            throw new TypeError('The BYOB Request has already been responded to');
+        }
+        spec.readableByteStreamControllerRespond(this[slots.controller], bytesWritten);
+    }
+
+    respondWithNewView(view) {
+        if (view instanceof ArrayBuffer) {
+            view = new Uint8Array(view);
+        }
+        if (!ArrayBuffer.isView(view)) {
+            throw new TypeError(`Parameter 1 is not an 'ArrayBufferView'`);
+        }
+        if (view.byteLength === 0) {
+            throw new TypeError(`Parameter 1 is an empty buffer`);
+        }
+        if (this[slots.controller] == null) {
+            throw new TypeError('The BYOB Request has already been invalidated');
+        }
+        return this.readableByteStreamControllerRespondWithNewView(this[slots.controller], view);
+    }
 }
 
 export class WritableStream {
