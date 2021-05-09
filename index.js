@@ -235,6 +235,34 @@ export class ReadableStreamDefaultController {
         }
         spec.readableStreamDefaultControllerEnqueue(this, chunk);
     }
+
+    error(e) {
+        spec.readableStreamDefaultControllerError(this, e);
+    }
+
+    [slots.cancelSteps](reason) {
+        spec.resetQueue(this);
+        const result = this[slots.cancelAlgorithm](reason);
+        spec.readableStreamDefaultControllerClearAlgorithms(this);
+        return result;
+    }
+
+    [slots.pullSteps](readRequest) {
+        const stream = this[slots.stream];
+        if (this[slots.queue].length > 0) {
+            const chunk = spec.dequeueValue(this);
+            if (this[slots.closeRequested] && this[slots.queue].length <= 0) {
+                spec.readableStreamDefaultControllerClearAlgorithms(this);
+                spec.readableStreamClose(stream);
+            } else {
+                spec.readableStreamDefaultControllerCallPullIfNeeded(this);
+            }
+            readRequest.chunkSteps(chunk);
+        } else {
+            spec.readableStreamAddReadRequest(stream, readRequest);
+            spec.readableStreamDefaultControllerCallPullIfNeeded(this);
+        }
+    }
 }
 
 export class ReadableByteStreamController {

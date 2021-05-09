@@ -34,6 +34,14 @@ export default {
         this.setUpReadableStreamDefaultReader(stream, reader);
         return reader;
     },
+    dequeueValue(container) {
+        assert?.(slots.queue in container && slots.queueTotalSize in container);
+        assert?.(container[slots.queue].length > 0);
+        const valueWithSize = container[slots.queue].shift();
+        container[slots.queueTotalSize] -= valueWithSize.size;
+        container[slots.queueTotalSize] = Math.max(0, container[slots.queueTotalSize]);
+        return valueWithSize.value;
+    },
     enqueueValueWithSize(container, value, size) {
         assert?.(slots.queue in container && slots.queueTotalSize in container);
         if (!isFinite(size)) {
@@ -358,6 +366,28 @@ export default {
             reader[slots.readRequests] = [];
         }
     },
+    readableStreamDefaultControllerCallPullIfNeeded(controller) {
+        const shouldPull = this.readableStreamDefaultControllerShouldCallPull(controller);
+        if (!shouldPull) {
+            return;
+        }
+        if (controller[slots.pulling]) {
+            controller[slots.pullAgain] = true;
+            return;
+        }
+        assert?.(controller[slots.pullAgain] === false);
+        controller[slots.pulling] = true;
+        controller[slots.pullAlgorithm]().then(() => {
+            // Return value ignored, the user provided pull function should use controller.enqueue() to add chunks.
+            controller[slots.pulling] = false;
+            if (controller[slots.pullAgain]) {
+                controller[slots.pullAgain] = false;
+                this.readableStreamDefaultControllerCallPullIfNeeded(controller);
+            }
+        }, e => {
+            this.readableStreamDefaultControllerError(controller, e);
+        });
+    },
     readableStreamDefaultControllerCanCloseOrEnqueue(controller) {
         const state = controller[slots.stream][slots.state];
         return !controller[slots.closeRequested] && state === 'readable';
@@ -407,6 +437,15 @@ export default {
             this.readableStreamDefaultControllerCallPullIfNeeded(controller);
         }
     },
+    readableStreamDefaultControllerError(controller, e) {
+        const stream = controller[slots.stream];
+        if (stream[slots.state] !== 'readable') {
+            return;
+        }
+        this.resetQueue(controller);
+        this.readableStreamDefaultControllerClearAlgorithms(controller);
+        this.readableStreamError(stream, e);
+    },
     readableStreamDefaultControllerGetDesiredSize(controller) {
         const state = controller[slots.stream][slots.state];
         if (state === 'errored') {
@@ -416,6 +455,21 @@ export default {
             return 0;
         }
         return controller[slots.strategyHWM] - controller[slots.queueTotalSize];
+    },
+    readableStreamDefaultControllerShouldCallPull(controller) {
+        if (!this.readableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return false;
+        }
+        if (!controller[slots.started]) {
+            return false;
+        }
+        const stream = controller[slots.stream];
+        if (this.isReadableStreamLocked(stream) && this.readableStreamGetNumReadRequests(stream) > 0) {
+            return true;
+        }
+        const desiredSize = this.readableStreamDefaultControllerGetDesiredSize(controller);
+        assert?.(desiredSize != null);
+        return desiredSize > 0;
     },
     readableStreamDefaultReaderRead(reader, readRequest) {
         const stream = reader[slots.stream];
@@ -451,6 +505,28 @@ export default {
                 readIntoRequest.errorSteps(e);
             }
             reader[slots.readRequests] = [];
+        }
+    },
+    readableStreamFulfillReadIntoRequest(stream, chunk, done) {
+        assert?.(this.readableStreamHasBYOBReader(stream));
+        const reader = stream[slots.reader];
+        assert?.(reader[slots.readIntoRequests].length > 0);
+        const readIntoRequest = reader[slots.readIntoRequest].shift();
+        if (done) {
+            readIntoRequest.closeSteps(chunk);
+        } else {
+            readIntoRequest.chunkSteps(chunk);
+        }
+    },
+    readableStreamFulfillReadRequest(stream, chunk, done) {
+        assert?.(this.readableStreamHasDefaultReader(stream));
+        const reader = stream[slots.reader];
+        assert?.(reader[slots.readRequests].length > 0);
+        const readRequest = reader[slots.readRequests].shift();
+        if (done) {
+            readRequest.closeSteps();
+        } else {
+            readRequest.chunkSteps(chunk);
         }
     },
     readableStreamGetNumReadIntoRequests(stream) {
