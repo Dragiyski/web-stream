@@ -7,7 +7,7 @@ import {
     ReadableStreamBYOBReader,
     ReadableStreamDefaultController,
     ReadableByteStreamController,
-    ReadableStreamBYOBRequest
+    WritableStreamDefaultController
 } from './index.js';
 
 const typedArrayTable = new Map();
@@ -23,7 +23,23 @@ typedArrayTable.set(BigUint64Array.prototype, BigUint64Array);
 typedArrayTable.set(Float32Array.prototype, Float32Array);
 typedArrayTable.set(Float64Array.prototype, Float64Array);
 
-export default {
+const spec = {
+    ReadableStreamAsyncIterator: class ReadableStreamAsyncIterator {
+        constructor(stream, ...args) {
+            spec.asynchronousIteratorInitializationSteps(stream, this, args);
+        }
+
+        async next() {
+            return spec.asynchronousIteratorNextIterationResult(this);
+        }
+
+        async return(arg) {
+            return {
+                value: await spec.asynchronousIteratorReturn(this, arg),
+                done: true
+            };
+        }
+    },
     acquireReadableStreamBYOBReader(stream) {
         const reader = Object.create(ReadableStreamBYOBReader.prototype);
         this.setUpReadableStreamBYOBReader(stream, reader);
@@ -34,6 +50,58 @@ export default {
         this.setUpReadableStreamDefaultReader(stream, reader);
         return reader;
     },
+    asynchronousIteratorInitializationSteps(stream, iterator, args) {
+        const reader = this.acquireReadableStreamDefaultReader(stream);
+        iterator[slots.reader] = reader;
+        iterator[slots.preventCancel] = Boolean(args?.[0]?.preventCancel);
+    },
+    async asynchronousIteratorNextIterationResult(iterator) {
+        const reader = iterator[slots.reader];
+        if (reader[slots.stream] == null) {
+            throw new TypeError('Readable stream has been closed');
+        }
+        const readRequest = {
+            spec: this,
+            chunkSteps(chunk) {
+                this.resolve({
+                    value: chunk,
+                    done: false
+                });
+            },
+            closeSteps() {
+                this.spec.readableStreamReaderGenericRelease(reader);
+                this.resolve({
+                    value: undefined,
+                    done: true
+                });
+            },
+            errorSteps(e) {
+                this.spec.readableStreamReaderGenericRelease(reader);
+                this.reject(e);
+            }
+        };
+        readRequest.promise = new Promise((resolve, reject) => {
+            readRequest.resolve = resolve;
+            readRequest.reject = reject;
+        });
+        this.readableStreamDefaultReaderRead(reader, readRequest);
+        return readRequest.promise;
+    },
+    async asynchronousIteratorReturn(iterator, arg) {
+        const reader = iterator[slots.reader];
+        if (reader[slots.stream] == null) {
+            throw new TypeError('Readable stream has been closed');
+        }
+        // Async iterator guarantees all promises for the iterations has been resolved.
+        assert?.(reader[slots.readRequests].length <= 0);
+        if (!iterator[slots.preventCancel]) {
+            const result = this.readableStreamReaderGenericCancel(reader, arg);
+            this.readableStreamReaderGenericRelease(reader);
+            return result;
+        }
+        this.readableStreamReaderGenericRelease(reader);
+    },
+    closeSentinel: Symbol('close sentinel'),
     createReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark = 1, sizeAlgorithm = () => 1) {
         if (highWaterMark == null) {
             highWaterMark = 1;
@@ -86,8 +154,20 @@ export default {
     },
     initializeReadableStream(stream) {
         stream[slots.state] = 'readable';
-        stream[slots.reader] = stream[slots.storedError] = undefined;
+        stream[slots.reader] = stream[slots.storedError] = null;
         stream[slots.disturbed] = false;
+    },
+    initializeWritableStream(stream) {
+        stream[slots.state] = 'writable';
+        stream[slots.storedError] = null;
+        stream[slots.writer] = null;
+        stream[slots.controller] = null;
+        stream[slots.inFlightWriteRequest] = null;
+        stream[slots.closeRequest] = null;
+        stream[slots.inFlightCloseRequest] = null;
+        stream[slots.pendingAbortRequest] = null;
+        stream[slots.writeRequests] = [];
+        stream[slots.backpressure] = false;
     },
     isReadableStreamLocked(stream) {
         return stream[slots.reader] != null;
@@ -95,10 +175,27 @@ export default {
     isWritableStreamLocked(stream) {
         return stream[slots.writer] != null;
     },
+    makeUnderlyingSinkDict(sink) {
+        const result = {};
+        if (sink != null && sink !== Object(sink)) {
+            throw new TypeError(`The underlying sink must be object, if specified`);
+        }
+        for (const name of ['start', 'write', 'close', 'abort']) {
+            const value = sink[name];
+            if (value != null) {
+                if (typeof value !== 'function') {
+                    throw new TypeError(`The underlying sink '${name}' exists, but it is not a function`);
+                }
+                result[name] = value;
+            }
+        }
+        // Ignore "type" (specs says "any attempts to supply a value will throw an exception", but we just ignore it.
+        result.type = null;
+    },
     makeUnderlyingSourceDict(source) {
         const result = {};
-        if (source == null || source !== Object(source)) {
-            throw new TypeError(`The underlying source must be null/undefined or object`);
+        if (source != null && source !== Object(source)) {
+            throw new TypeError(`The underlying source must be object, if specified`);
         }
         for (const name of ['start', 'pull', 'cancel']) {
             const value = source[name];
@@ -177,9 +274,9 @@ export default {
                 this.readableByteStreamControllerError(controller, e);
                 throw e;
             }
-            this.readableByteStreamControllerClearAlgorithms(controller);
-            this.readableStreamClose(stream);
         }
+        this.readableByteStreamControllerClearAlgorithms(controller);
+        this.readableStreamClose(stream);
     },
     readableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor) {
         const bytesFilled = pullIntoDescriptor.bytesFilled;
@@ -203,7 +300,7 @@ export default {
         if (pullIntoDescriptor.readerType === 'default') {
             this.readableStreamFulfillReadRequest(stream, filledView, done);
         } else {
-            assert(pullIntoDescriptor.readerType === 'byob');
+            assert?.(pullIntoDescriptor.readerType === 'byob');
             this.readableStreamFulfillReadIntoRequest(stream, filledView, done);
         }
     },
@@ -220,7 +317,7 @@ export default {
             if (this.readableStreamGetNumReadRequests(stream) === 0) {
                 this.readableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
             } else {
-                assert?.(controller[slots.queue].length > 0);
+                assert?.(controller[slots.queue].length <= 0);
                 const transferredView = new Uint8Array(transferredBuffer, byteOffset, byteLength);
                 this.readableStreamFulfillReadRequest(stream, transferredView, false);
             }
@@ -641,12 +738,13 @@ export default {
         const stream = reader[slots.stream];
         assert?.(stream != null);
         stream[slots.disturbed] = true;
-        if (stream.state === 'closed') {
+        const state = stream[slots.state];
+        if (state === 'closed') {
             readRequest.closeSteps();
-        } else if (stream.state === 'errored') {
+        } else if (state === 'errored') {
             readRequest.errorSteps(stream[slots.storedError]);
         } else {
-            assert?.(stream.state === 'readable');
+            assert?.(state === 'readable');
             stream[slots.controller][slots.pullSteps](readRequest);
         }
     },
@@ -659,7 +757,7 @@ export default {
             return;
         }
         reader[slots.closedDefer].reject(e);
-        reader[slots.closedDefer].isHandled = true;
+        reader[slots.closedDefer].promise.catch(() => { });
         if (reader instanceof ReadableStreamDefaultReader) {
             for (const readRequest of reader[slots.readRequests]) {
                 readRequest.errorSteps(e);
@@ -793,6 +891,11 @@ export default {
 
         return defer.promise;
     },
+    readableStreamReaderGenericCancel(reader, reason) {
+        const stream = reader[slots.stream];
+        assert?.(stream != null);
+        return this.readableStreamCancel(stream, reason);
+    },
     readableStreamReaderGenericInitialize(reader, stream) {
         reader[slots.stream] = stream;
         stream[slots.reader] = reader;
@@ -808,19 +911,19 @@ export default {
         } else {
             assert?.(stream[slots.state] === 'errored');
             stream[slots.closedDefer] = { promise: Promise.reject(stream[slots.storedError]) };
-            stream[slots.closedDefer].isHandled = true;
+            stream[slots.closedDefer].promise.catch(() => { });
         }
     },
     readableStreamReaderGenericRelease(reader) {
         assert?.(reader[slots.stream] != null);
         assert?.(reader[slots.stream][slots.reader] === reader);
         if (reader[slots.stream][slots.state] === 'readable') {
-            reader[slots.stream][slots.closedDefer].reject(new TypeError('Cannot release a readable stream reader when it still has outstanding read() calls that have not yet settled'));
+            reader[slots.closedDefer].reject(new TypeError('Cannot release a readable stream reader when it still has outstanding read() calls that have not yet settled'));
         } else {
-            reader[slots.stream][slots.closedDefer] = {};
-            reader[slots.stream][slots.closedDefer].promise = Promise.reject(new TypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`));
+            reader[slots.closedDefer] = {};
+            reader[slots.closedDefer].promise = Promise.reject(new TypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`));
         }
-        reader[slots.stream][slots.closedDefer].promise.catch(() => { }); // [[PromiseIsHandled]] = true
+        reader[slots.closedDefer].promise.catch(() => { }); // [[PromiseIsHandled]] = true
         reader[slots.stream][slots.reader] = null;
         reader[slots.stream] = null;
     },
@@ -844,8 +947,8 @@ export default {
         controller[slots.autoAllocateChunkSize] = autoAllocateChunkSize;
         controller[slots.pendingPullIntos] = [];
         stream[slots.controller] = controller;
-        const startResult = startAlgorithm(); // Called synchrnonously, so exception thrown propagate immediately.
-        Promise.resolve(startResult).then(() => {
+        // Called synchrnonously, so exception thrown propagate immediately.
+        Promise.resolve(startAlgorithm(controller)).then(() => {
             controller[slots.started] = true;
             assert?.(controller[slots.pulling] === false);
             assert?.(controller[slots.pullAgain] === false);
@@ -900,8 +1003,8 @@ export default {
         controller[slots.pullAlgorithm] = pullAlgorithm;
         controller[slots.cancelAlgorithm] = cancelAlgorithm;
         stream[slots.controller] = controller;
-        const startResult = startAlgorithm(); // Called synchrnonously, so exception thrown propagate immediately.
-        Promise.resolve(startResult).then(
+        // Called synchrnonously, so exception thrown propagate immediately.
+        Promise.resolve(startAlgorithm(controller)).then(
             () => {
                 controller[slots.started] = true;
                 assert?.(controller[slots.pulling] === false);
@@ -936,7 +1039,145 @@ export default {
         this.readableStreamReaderGenericInitialize(reader, stream);
         reader[slots.readRequests] = [];
     },
+    setUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm) {
+        assert?.(stream instanceof WritableStream);
+        assert?.(stream[slots.controller] == null);
+        controller[slots.stream] = stream;
+        stream[slots.controller] = controller;
+        this.resetQueue(controller);
+        controller[slots.started] = false;
+        controller[slots.strategySizeAlgorithm] = sizeAlgorithm;
+        controller[slots.strategyHWM] = highWaterMark;
+        controller[slots.writeAlgorithm] = writeAlgorithm;
+        controller[slots.closeAlgorithm] = closeAlgorithm;
+        controller[slots.abortAlgorithm] = abortAlgorithm;
+        const backpressure = this.writableStreamDefaultControllerGetBackpressure(controller);
+        this.writableStreamUpdateBackpressure(stream, backpressure);
+        Promise.resolve(startAlgorithm(controller)).then(() => {
+            assert?.(stream[slots.state] === 'writable' || stream[slots.state] === 'erroring');
+            controller[slots.started] = true;
+            this.writableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+        }, r => {
+            assert?.(stream[slots.state] === 'writable' || stream[slots.state] === 'erroring');
+            controller[slots.started] = true;
+            this.writableStreamDealWithRejection(stream, r);
+        });
+    },
+    setUpWritableStreamDefaultControllerFromUnderlyingSink(stream, underlyingSink, underlyingSinkDict, highWaterMark, sizeAlgorithm) {
+        const controller = Object.create(WritableStreamDefaultController.prototype);
+        let startAlgorithm = () => { };
+        let writeAlgorithm = async () => { };
+        let closeAlgorithm = async () => { };
+        let abortAlgorithm = async () => { };
+        if (underlyingSinkDict.start != null) {
+            startAlgorithm = controller => underlyingSinkDict.start.call(underlyingSink, controller);
+        }
+        if (underlyingSinkDict.write != null) {
+            writeAlgorithm = async (chunk, controller) => underlyingSinkDict.write.call(underlyingSink, chunk, controller);
+        }
+        if (underlyingSinkDict.close != null) {
+            closeAlgorithm = async () => underlyingSinkDict.close.call(underlyingSink);
+        }
+        if (underlyingSinkDict.abort != null) {
+            abortAlgorithm = async reason => underlyingSinkDict.abort.call(underlyingSink, reason);
+        }
+        this.setUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm);
+    },
     transferArrayBuffer(o) {
         return o;
+    },
+    writableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
+        if (!controller[slots.started]) {
+            return;
+        }
+        const stream = controller[slots.stream];
+        if (stream[slots.inFlightWriteRequest] != null) {
+            return;
+        }
+        const state = stream[slots.state];
+        assert?.(state !== 'closed' && state !== 'errored');
+        if (state === 'erroring') {
+            this.writableStreamFinishErroring(stream);
+            return;
+        }
+        if (controller[slots.queue].length <= 0) {
+            return;
+        }
+        const value = this.peekQueueValue(controller);
+        if (value === this.closeSentinel) {
+            this.writableStreamDefaultControllerProcessClose(controller);
+        } else {
+            this.writableStreamDefaultControllerProcessWrite(controller, value);
+        }
+    },
+    writableStreamDefaultControllerGetBackpressure(controller) {
+        return this.writableStreamDefaultControllerGetDesiredSize(controller) <= 0;
+    },
+    writableStreamDefaultControllerGetDesiredSize(controller) {
+        return controller[slots.strategyHWM] - controller[slots.queueTotalSize];
+    },
+    writableStreamHasOperationMarkedInFlight(stream) {
+        return stream[slots.inFlightWriteRequest] != null || stream[slots.controller][slots.inFlightCloseRequest] != null;
+    },
+    writableStreamFinishErroring(stream, reason) {
+        assert?.(stream[slots.state] === 'erroring');
+        assert?.(!this.writableStreamHasOperationMarkedInFlight(stream));
+        stream[slots.state] = 'errored';
+        stream[slots.controller][slots.errorSteps]();
+        const storedError = stream[slots.storedError];
+        for (const writeRequest of stream[slots.writeRequests]) {
+            writeRequest.reject(storedError);
+        }
+        stream[slots.writeRequests].length = 0;
+        if (stream[slots.pendingAbortRequest] == null) {
+            this.writableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+            return;
+        }
+        const abortRequest = stream[slots.pendingAbortRequest];
+        stream[slots.pendingAbortRequest] = null;
+        if (abortRequest.wasAlreadyErroring) {
+            abortRequest.reject(storedError);
+            this.writableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+            return;
+        }
+        stream[slots.controller][slots.abortSteps](abortRequest.reason).then(() => {
+            abortRequest.resolve(undefined);
+            this.writableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+        }, reason => {
+            abortRequest.reject(reason);
+            this.writableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+        });
+    },
+    writableStreamRejectCloseAndClosedPromiseIfNeeded(stream) {
+        assert?.(stream[slots.state] === 'errored');
+        if (stream[slots.closeRequest] != null) {
+            assert?.(stream[slots.inFlightCloseRequest] == null);
+            stream[slots.closeRequest].reject(stream[slots.storedError]);
+            stream[slots.closeRequest] = null;
+        }
+        const writer = stream[slots.writer];
+        if (writer != null) {
+            writer[slots.closedDefer].reject(stream[slots.storedError]);
+            writer[slots.closedDefer].promise.catch(() => { });
+        }
+    },
+    writableStreamUpdateBackpressure(stream, backpressure) {
+        assert?.(stream[slots.state] === 'writable');
+        assert?.(!this.writableStreamCloseQueuedOrInFlight(stream));
+        const writer = stream[slots.writer];
+        if (writer != null && backpressure !== stream[slots.backpressure]) {
+            if (backpressure) {
+                const defer = writer[slots.readyDefer] = {};
+                defer.promise = new Promise((resolve, reject) => {
+                    defer.resolve = resolve;
+                    defer.reject = reject;
+                });
+            } else {
+                writer[slots.readyDefer].resolve(undefined);
+            }
+        }
+        stream[slots.backpressure] = backpressure;
     }
 };
+
+export default spec;

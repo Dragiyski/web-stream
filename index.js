@@ -34,10 +34,10 @@ export class ReadableStream {
     }
 
     getReader(options = {}) {
-        if (options != null || options !== Object(options)) {
-            throw new TypeError('Invalid options: cannot convert to dictionary');
-        } else if (options == null) {
+        if (options == null) {
             options = {};
+        } else if (options !== Object(options)) {
+            throw new TypeError('Invalid options: cannot convert to dictionary');
         }
         const mode = options.mode;
         let byob = false;
@@ -47,7 +47,7 @@ export class ReadableStream {
             }
             byob = true;
         }
-        return (byob ? spec.acquireReadableStreamBYOBReader : spec.acquireReadableStreamDefaultReader)(this);
+        return byob ? spec.acquireReadableStreamBYOBReader(this) : spec.acquireReadableStreamDefaultReader(this);
     }
 
     pipeThrough(transform, options) {
@@ -107,6 +107,19 @@ export class ReadableStream {
     tee() {
         return spec.readableStreamTee(this, false);
     }
+
+    values(options = null) {
+        if (options == null) {
+            options = {};
+        } else if (options !== Object(options)) {
+            throw new TypeError('Invalid options: must be object, if specified');
+        }
+        return new spec.ReadableStreamAsyncIterator(this, options);
+    }
+
+    [Symbol.asyncIterator]() {
+        return new spec.ReadableStreamAsyncIterator(this);
+    }
 }
 
 export class ReadableStreamDefaultReader {
@@ -121,30 +134,29 @@ export class ReadableStreamDefaultReader {
         if (this[slots.stream] == null) {
             throw new TypeError(`Illegal invocation`);
         }
-        const defer = {};
-        defer.promise = new Promise((resolve, reject) => {
-            defer.resolve = resolve;
-            defer.reject = reject;
-        });
         const readRequest = {
             chunkSteps(chunk) {
-                defer.resolve({
+                this.resolve({
                     value: chunk,
                     done: false
                 });
             },
             closeSteps() {
-                defer.resolve({
+                this.resolve({
                     value: undefined,
                     done: true
                 });
             },
             errorSteps(e) {
-                defer.reject(e);
+                this.reject(e);
             }
         };
+        readRequest.promise = new Promise((resolve, reject) => {
+            readRequest.resolve = resolve;
+            readRequest.reject = reject;
+        });
         spec.readableStreamDefaultReaderRead(this, readRequest);
-        return defer.promise;
+        return readRequest.promise;
     }
 
     releaseLock() {
@@ -271,7 +283,7 @@ export class ReadableByteStreamController {
         if (this[slots.byobRequest] == null && this[slots.pendingPullIntos].length > 0) {
             const firstDescriptor = this[slots.pendingPullIntos][0];
             const view = new Uint8Array(firstDescriptor.buffer, firstDescriptor.byteOffset + firstDescriptor.bytesFilled, firstDescriptor.byteLength - firstDescriptor.bytesFilled);
-            const byobRequest = new ReadableStreamBYOBRequest();
+            const byobRequest = Object.create(ReadableStreamBYOBRequest.prototype);
             byobRequest[slots.controller] = this;
             byobRequest[slots.view] = view;
             this[slots.byobRequest] = byobRequest;
@@ -315,7 +327,7 @@ export class ReadableByteStreamController {
             this[slots.pendingPullIntos][0].bytesFilled = 0;
         }
         spec.resetQueue(this);
-        const result = this[slots.cancelAlgorithm](this);
+        const result = this[slots.cancelAlgorithm](reason);
         spec.readableByteStreamControllerClearAlgorithms(this);
         return result;
     }
@@ -391,13 +403,28 @@ export class ReadableStreamBYOBRequest {
             throw new TypeError(`Parameter 1 is an empty buffer`);
         }
         if (this[slots.controller] == null) {
-            throw new TypeError('The BYOB Request has already been invalidated');
+            throw new TypeError(`The BYOB Request has already been invalidated`);
         }
         return this.readableByteStreamControllerRespondWithNewView(this[slots.controller], view);
     }
 }
 
 export class WritableStream {
+    constructor(underlyingSink = null, strategy = {}) {
+        const underlyingSinkDict = spec.makeUnderlyingSinkDict(underlyingSink);
+        if (strategy == null) {
+            strategy = {};
+        } else if (strategy !== Object(strategy)) {
+            throw new TypeError(`Expected startegy to be an object, if specified`);
+        }
+        if (underlyingSinkDict.type != null) {
+            throw new RangeError(`Invalid type is specified`);
+        }
+        spec.initializeWritableStream(this);
+        const sizeAlgorithm = spec.extractSizeAlgorithm(strategy);
+        const highWaterMark = spec.extractHighWaterMark(strategy, 1);
+        spec.setUpWritableStreamDefaultControllerFromUnderlyingSink(this, underlyingSink, underlyingSinkDict, highWaterMark, sizeAlgorithm);
+    }
 }
 
 export class WritableStreamDefaultWriter {
