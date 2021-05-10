@@ -282,7 +282,7 @@ const spec = {
         const bytesFilled = pullIntoDescriptor.bytesFilled;
         const elementSize = pullIntoDescriptor.elementSize;
         assert?.(pullIntoDescriptor.bytesFilled <= pullIntoDescriptor.byteLength);
-        assert?.(bytesFilled & elementSize === 0);
+        assert?.(bytesFilled % elementSize === 0);
         // Here we cannot use the pullIntoDescriptor data as intended, but the general idea is to create a view
         // for the existing buffer, with the same type as the provided view, which is only possible for aligned elements.
         // To do this, we need to compute the aligned byte elements first:
@@ -331,7 +331,7 @@ const spec = {
         this.readableByteStreamControllerCallPullIfNeeded(controller);
     },
     readableByteStreamControllerEnqueueChunkToQueue(controller, buffer, byteOffset, byteLength) {
-        controller[slots.queue]({ buffer, byteOffset, byteLength });
+        controller[slots.queue].push({ buffer, byteOffset, byteLength });
         controller[slots.queueTotalSize] += byteLength;
     },
     readableByteStreamControllerError(controller, e) {
@@ -353,7 +353,7 @@ const spec = {
         const elementSize = pullIntoDescriptor.elementSize;
         const currentAlignedBytes = pullIntoDescriptor.bytesFilled - (pullIntoDescriptor.bytesFilled % elementSize);
         const maxBytesToCopy = Math.min(controller[slots.queueTotalSize], pullIntoDescriptor.byteLength - pullIntoDescriptor.bytesFilled);
-        const maxBytesFilled = pullIntoDescriptor.bytesFilled - maxBytesToCopy;
+        const maxBytesFilled = pullIntoDescriptor.bytesFilled + maxBytesToCopy;
         const maxAlignedBytes = maxBytesFilled - (maxBytesFilled % elementSize);
         let totalBytesToCopyRemaining = maxBytesToCopy;
         let ready = false;
@@ -765,17 +765,17 @@ const spec = {
             reader[slots.readRequests] = [];
         } else {
             assert?.(reader instanceof ReadableStreamBYOBReader);
-            for (const readIntoRequest of reader[slots.readRequests]) {
+            for (const readIntoRequest of reader[slots.readIntoRequests]) {
                 readIntoRequest.errorSteps(e);
             }
-            reader[slots.readRequests] = [];
+            reader[slots.readIntoRequests] = [];
         }
     },
     readableStreamFulfillReadIntoRequest(stream, chunk, done) {
         assert?.(this.readableStreamHasBYOBReader(stream));
         const reader = stream[slots.reader];
         assert?.(reader[slots.readIntoRequests].length > 0);
-        const readIntoRequest = reader[slots.readIntoRequest].shift();
+        const readIntoRequest = reader[slots.readIntoRequests].shift();
         if (done) {
             readIntoRequest.closeSteps(chunk);
         } else {
@@ -795,7 +795,7 @@ const spec = {
     },
     readableStreamGetNumReadIntoRequests(stream) {
         assert?.(this.readableStreamHasBYOBReader(stream) === true);
-        return stream[slots.reader][slots.readRequests].length;
+        return stream[slots.reader][slots.readIntoRequests].length;
     },
     readableStreamGetNumReadRequests(stream) {
         assert?.(this.readableStreamHasDefaultReader(stream) === true);

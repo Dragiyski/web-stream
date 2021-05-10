@@ -191,32 +191,29 @@ export class ReadableStreamBYOBReader {
         if (this[slots.stream] == null) {
             throw new TypeError(`This readable stream reader has been released and cannot be used to read from its previous owner stream`);
         }
-        const defer = {
-            this: this
-        };
-        defer.promise = new Promise((resolve, reject) => {
-            defer.resolve = resolve;
-            defer.reject = reject;
-        });
         const readIntoRequest = {
             chunkSteps(chunk) {
-                defer.resolve({
+                this.resolve({
                     value: chunk,
                     done: false
                 });
             },
             closeSteps(chunk) {
-                defer.resolve({
+                this.resolve({
                     value: chunk,
                     done: true
                 });
             },
-            errroSteps(e) {
-                defer.reject(e);
+            errorSteps(e) {
+                this.reject(e);
             }
         };
+        readIntoRequest.promise = new Promise((resolve, reject) => {
+            readIntoRequest.resolve = resolve;
+            readIntoRequest.reject = reject;
+        });
         spec.readableStreamBYOBReaderRead(this, view, readIntoRequest);
-        return defer.promise;
+        return readIntoRequest.promise;
     }
 
     releaseLock() {
