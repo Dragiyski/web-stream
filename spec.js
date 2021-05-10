@@ -10,19 +10,6 @@ import {
     WritableStreamDefaultController
 } from './index.js';
 
-const typedArrayTable = new Map();
-typedArrayTable.set(Int8Array.prototype, Int8Array);
-typedArrayTable.set(Uint8Array.prototype, Uint8Array);
-typedArrayTable.set(Uint8ClampedArray.prototype, Uint8ClampedArray);
-typedArrayTable.set(Int16Array.prototype, Int16Array);
-typedArrayTable.set(Uint16Array.prototype, Uint16Array);
-typedArrayTable.set(Int32Array.prototype, Int32Array);
-typedArrayTable.set(Uint32Array.prototype, Uint32Array);
-typedArrayTable.set(BigInt64Array.prototype, BigInt64Array);
-typedArrayTable.set(BigUint64Array.prototype, BigUint64Array);
-typedArrayTable.set(Float32Array.prototype, Float32Array);
-typedArrayTable.set(Float64Array.prototype, Float64Array);
-
 const spec = {
     ReadableStreamAsyncIterator: class ReadableStreamAsyncIterator {
         constructor(stream, ...args) {
@@ -58,7 +45,7 @@ const spec = {
     async asynchronousIteratorNextIterationResult(iterator) {
         const reader = iterator[slots.reader];
         if (reader[slots.stream] == null) {
-            throw new TypeError('Readable stream has been closed');
+            throw this.createNewTypeError('Readable stream has been closed');
         }
         const readRequest = {
             spec: this,
@@ -80,7 +67,7 @@ const spec = {
                 this.reject(e);
             }
         };
-        readRequest.promise = new Promise((resolve, reject) => {
+        readRequest.promise = this.createNewPromise((resolve, reject) => {
             readRequest.resolve = resolve;
             readRequest.reject = reject;
         });
@@ -90,7 +77,7 @@ const spec = {
     async asynchronousIteratorReturn(iterator, arg) {
         const reader = iterator[slots.reader];
         if (reader[slots.stream] == null) {
-            throw new TypeError('Readable stream has been closed');
+            throw this.createNewTypeError('Readable stream has been closed');
         }
         // Async iterator guarantees all promises for the iterations has been resolved.
         assert?.(reader[slots.readRequests].length <= 0);
@@ -102,6 +89,27 @@ const spec = {
         this.readableStreamReaderGenericRelease(reader);
     },
     closeSentinel: Symbol('close sentinel'),
+    createNew(Constructor, ...args) {
+        return new Constructor(...args);
+    },
+    createNewAbortError() {
+        const error = new Error(...arguments);
+        error.name = 'AbortError';
+        error.code = 'ABORT_ERR';
+        return error;
+    },
+    createNewEmptyList() {
+        return [];
+    },
+    createNewPromise() {
+        return new Promise(...arguments);
+    },
+    createNewRangeError() {
+        return new RangeError(...arguments);
+    },
+    createNewTypeError() {
+        return new TypeError(...arguments);
+    },
     createReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark = 1, sizeAlgorithm = () => 1) {
         if (highWaterMark == null) {
             highWaterMark = 1;
@@ -138,7 +146,7 @@ const spec = {
         }
         const highWaterMark = Number(strategy.highWaterMark);
         if (!Number.isSafeInteger(highWaterMark) || highWaterMark < 0) {
-            throw RangeError('Invalid [strategy.highWaterMark], expected valid non-negative integer');
+            throw this.createNewRangeError('Invalid [strategy.highWaterMark], expected valid non-negative integer');
         }
         return highWaterMark;
     },
@@ -147,7 +155,7 @@ const spec = {
             return () => 1;
         }
         if (typeof strategy.size !== 'function') {
-            throw new TypeError('The option [strategy.size] must be a function, if specified');
+            throw this.createNewTypeError('The option [strategy.size] must be a function, if specified');
         }
         const size = strategy.size.bind(strategy);
         return chunk => size(chunk);
@@ -166,7 +174,7 @@ const spec = {
         stream[slots.closeRequest] = null;
         stream[slots.inFlightCloseRequest] = null;
         stream[slots.pendingAbortRequest] = null;
-        stream[slots.writeRequests] = [];
+        stream[slots.writeRequests] = this.createNewEmptyList();
         stream[slots.backpressure] = false;
     },
     isReadableStreamLocked(stream) {
@@ -178,13 +186,13 @@ const spec = {
     makeUnderlyingSinkDict(sink) {
         const result = {};
         if (sink != null && sink !== Object(sink)) {
-            throw new TypeError(`The underlying sink must be object, if specified`);
+            throw this.createNewTypeError(`The underlying sink must be object, if specified`);
         }
         for (const name of ['start', 'write', 'close', 'abort']) {
             const value = sink[name];
             if (value != null) {
                 if (typeof value !== 'function') {
-                    throw new TypeError(`The underlying sink '${name}' exists, but it is not a function`);
+                    throw this.createNewTypeError(`The underlying sink '${name}' exists, but it is not a function`);
                 }
                 result[name] = value;
             }
@@ -195,13 +203,13 @@ const spec = {
     makeUnderlyingSourceDict(source) {
         const result = {};
         if (source != null && source !== Object(source)) {
-            throw new TypeError(`The underlying source must be object, if specified`);
+            throw this.createNewTypeError(`The underlying source must be object, if specified`);
         }
         for (const name of ['start', 'pull', 'cancel']) {
             const value = source[name];
             if (value != null) {
                 if (typeof value !== 'function') {
-                    throw new TypeError(`The underlying source '${name}' exists, but it is not a function`);
+                    throw this.createNewTypeError(`The underlying source '${name}' exists, but it is not a function`);
                 }
                 result[name] = source[name];
             }
@@ -210,7 +218,7 @@ const spec = {
             const autoAllocateChunkSize = source.autoAllocateChunkSize;
             if (autoAllocateChunkSize != null) {
                 if (!Number.isSafeInteger(autoAllocateChunkSize)) {
-                    throw new TypeError(`The option [underlyingSource.autoAllocateChunkSize] must be an integer, if present`);
+                    throw this.createNewTypeError(`The option [underlyingSource.autoAllocateChunkSize] must be an integer, if present`);
                 }
                 result.autoAllocateChunkSize = autoAllocateChunkSize;
             }
@@ -219,7 +227,7 @@ const spec = {
             const type = source.type;
             if (type != null) {
                 if (type !== 'bytes') {
-                    throw new TypeError(`The option [underlyingSource.type] must be exactly the string "bytes", if present`);
+                    throw this.createNewTypeError(`The option [underlyingSource.type] must be exactly the string "bytes", if present`);
                 }
                 result.type = type;
             }
@@ -256,7 +264,7 @@ const spec = {
     },
     readableByteStreamControllerClearPendingPullIntos(controller) {
         this.readableByteStreamControllerInvalidateBYOBRequest(controller);
-        controller[slots.pendingPullIntos] = [];
+        controller[slots.pendingPullIntos] = this.createNewEmptyList();
     },
     readableByteStreamControllerClose(controller) {
         const stream = controller[slots.stream];
@@ -270,7 +278,7 @@ const spec = {
         if (controller[slots.pendingPullIntos].length > 0) {
             const firstPendingPullInto = controller[slots.pendingPullIntos][0];
             if (firstPendingPullInto.bytesFilled > 0) {
-                const e = new TypeError('There are outstanding read requests');
+                const e = this.createNewTypeError('There are outstanding read requests');
                 this.readableByteStreamControllerError(controller, e);
                 throw e;
             }
@@ -287,7 +295,7 @@ const spec = {
         // for the existing buffer, with the same type as the provided view, which is only possible for aligned elements.
         // To do this, we need to compute the aligned byte elements first:
         const byteLength = bytesFilled - bytesFilled % elementSize; // Equivalen of Math.floor(bytesFilled / elementSize) * elementSize;
-        return new pullIntoDescriptor.ViewConstructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, byteLength);
+        return this.createNew(pullIntoDescriptor.ViewConstructor, pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, byteLength);
     },
     readableByteStreamControllerCommitPullIntoDescriptor(stream, pullIntoDescriptor) {
         assert?.(stream[slots.state] !== 'errored');
@@ -318,7 +326,7 @@ const spec = {
                 this.readableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
             } else {
                 assert?.(controller[slots.queue].length <= 0);
-                const transferredView = new Uint8Array(transferredBuffer, byteOffset, byteLength);
+                const transferredView = this.createNew(Uint8Array, transferredBuffer, byteOffset, byteLength);
                 this.readableStreamFulfillReadRequest(stream, transferredView, false);
             }
         } else if (this.readableStreamHasBYOBReader(stream)) {
@@ -372,8 +380,8 @@ const spec = {
             // However, V8 optimizations reduce it (after some checks) to C memmove() function if the types are compatible.
 
             // To call set on limited bytesToCopy we need to construct a view, since we cannot specify the byteLength.
-            const sourceView = new pullIntoDescriptor.ByteConstructor(headOfQueue.buffer, headOfQueue.byteOffset, bytesToCopy);
-            const targetView = new pullIntoDescriptor.ByteConstructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, pullIntoDescriptor.byteLength);
+            const sourceView = this.createNew(pullIntoDescriptor.ByteConstructor, headOfQueue.buffer, headOfQueue.byteOffset, bytesToCopy);
+            const targetView = this.createNew(pullIntoDescriptor.ByteConstructor, pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, pullIntoDescriptor.byteLength);
             targetView.set(sourceView, destStart); // Optimized to checks + cmemmove()
 
             if (headOfQueue.byteLength === bytesToCopy) {
@@ -445,8 +453,8 @@ const spec = {
             elementSize = view.BYTES_PER_ELEMENT;
             let v = Object.getPrototypeOf(view);
             do {
-                if (typedArrayTable.has(v)) {
-                    ArrayBufferView = typedArrayTable.get(v);
+                if (this.typedArrayTable.has(v)) {
+                    ArrayBufferView = this.typedArrayTable.get(v);
                     break;
                 }
                 v = Object.getPrototypeOf(v);
@@ -475,7 +483,7 @@ const spec = {
             return;
         }
         if (stream[slots.state] === 'closed') {
-            const emptyView = new ArrayBufferView(new ArrayBuffer(0));
+            const emptyView = this.createNew(ArrayBufferView, this.createNew(ArrayBuffer, 0));
             readIntoRequest.closeSteps(emptyView);
             return;
         }
@@ -487,7 +495,7 @@ const spec = {
                 return;
             }
             if (controller[slots.closeRequested]) {
-                const e = new TypeError('The controller close() is called before the current pull');
+                const e = this.createNewTypeError('The controller close() is called before the current pull');
                 this.readableByteStreamControllerError(controller, e);
                 readIntoRequest.errorSteps(e);
                 return;
@@ -514,7 +522,7 @@ const spec = {
     },
     readableByteStreamControllerRespondInReadableState(controller, bytesWritten, pullIntoDescriptor) {
         if (pullIntoDescriptor.bytesFilled + bytesWritten > pullIntoDescriptor.byteLength) {
-            throw new RangeError('response reports bytes outside bounds of BYOB request');
+            throw this.createNewRangeError('response reports bytes outside bounds of BYOB request');
         }
         this.readableByteStreamControllerFillHeadPullIntoDescriptor(controller, bytesWritten, pullIntoDescriptor);
         if (pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize) {
@@ -537,7 +545,7 @@ const spec = {
         const state = controller[slots.stream][slots.state];
         if (state === 'closed') {
             if (bytesWritten > 0) {
-                throw new TypeError('The stream is already closed');
+                throw this.createNewTypeError('The stream is already closed');
             }
             this.readableByteStreamControllerRespondInClosedState(controller, firstDescriptor);
         } else {
@@ -549,13 +557,13 @@ const spec = {
     readableByteStreamControllerRespondWithNewView(controller, view) {
         assert?.(controller[slots.pendingPullIntos].length > 0);
         const firstDescriptor = controller[slots.pendingPullIntos][0];
-        if (firstDescriptor.byteOffset + firstDescriptor.bytesFilled !== view.byteOffset) {
-            throw new RangeError(`The view byte offset does not match the range of the request`);
-        }
-        if (firstDescriptor.byteLength !== view.byteLength) {
-            throw new RangeError(`The view byte length does not match the range of the request`);
-        }
+        // Differences from standard: here the standard requires the new view to have the same byteOffset and byteLength
+        // as the BYOB request, but the only reason it seems in order to compute bytesFilled properly?
+        // Even when the response is with larger view
         firstDescriptor.buffer = view.buffer;
+        firstDescriptor.byteOffset = view.byteOffset;
+        firstDescriptor.byteLength = view.byteLength;
+        firstDescriptor.bytesFilled = 0;
         this.readableByteStreamControllerRespondInternal(controller, view.byteLength);
     },
     readableByteStreamControllerShiftPendingPullInto(controller) {
@@ -627,7 +635,7 @@ const spec = {
             for (const readRequest of reader[slots.readRequests]) {
                 readRequest.closeSteps();
             }
-            reader[slots.readRequests] = [];
+            reader[slots.readRequests] = this.createNewEmptyList();
         }
     },
     readableStreamDefaultControllerCallPullIfNeeded(controller) {
@@ -762,13 +770,13 @@ const spec = {
             for (const readRequest of reader[slots.readRequests]) {
                 readRequest.errorSteps(e);
             }
-            reader[slots.readRequests] = [];
+            reader[slots.readRequests] = this.createNewEmptyList();
         } else {
             assert?.(reader instanceof ReadableStreamBYOBReader);
             for (const readIntoRequest of reader[slots.readIntoRequests]) {
                 readIntoRequest.errorSteps(e);
             }
-            reader[slots.readIntoRequests] = [];
+            reader[slots.readIntoRequests] = this.createNewEmptyList();
         }
     },
     readableStreamFulfillReadIntoRequest(stream, chunk, done) {
@@ -835,16 +843,14 @@ const spec = {
         source[slots.disturbed] = true;
         const shuttingDown = false;
         const defer = {};
-        defer.promise = new Promise((resolve, reject) => {
+        defer.promise = this.createNewPromise((resolve, reject) => {
             defer.resolve = resolve;
             defer.reject = reject;
         });
         if (signal != null) {
             const abortAlgorithm = () => {
-                const error = new Error('Pipe operation was aborted');
-                error.name = 'AbortError';
-                error.code = 'ABORT_ERR';
-                const actions = [];
+                const error = this.createNewAbortError('Pipe operation was aborted');
+                const actions = this.createNewEmptyList();
                 if (!preventAbort) {
                     actions.push(async () => {
                         if (dest.state === 'writable') {
@@ -901,7 +907,7 @@ const spec = {
         stream[slots.reader] = reader;
         if (stream[slots.state] === 'readable') {
             const defer = {};
-            defer.promise = new Promise((resolve, reject) => {
+            defer.promise = this.createNewPromise((resolve, reject) => {
                 defer.resolve = resolve;
                 defer.reject = reject;
             });
@@ -918,17 +924,17 @@ const spec = {
         assert?.(reader[slots.stream] != null);
         assert?.(reader[slots.stream][slots.reader] === reader);
         if (reader[slots.stream][slots.state] === 'readable') {
-            reader[slots.closedDefer].reject(new TypeError('Cannot release a readable stream reader when it still has outstanding read() calls that have not yet settled'));
+            reader[slots.closedDefer].reject(this.createNewTypeError('Cannot release a readable stream reader when it still has outstanding read() calls that have not yet settled'));
         } else {
             reader[slots.closedDefer] = {};
-            reader[slots.closedDefer].promise = Promise.reject(new TypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`));
+            reader[slots.closedDefer].promise = Promise.reject(this.createNewTypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`));
         }
         reader[slots.closedDefer].promise.catch(() => { }); // [[PromiseIsHandled]] = true
         reader[slots.stream][slots.reader] = null;
         reader[slots.stream] = null;
     },
     resetQueue(container) {
-        container[slots.queue] = [];
+        container[slots.queue] = this.createNewEmptyList();
         container[slots.queueTotalSize] = 0;
     },
     setUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, autoAllocateChunkSize) {
@@ -945,7 +951,7 @@ const spec = {
         controller[slots.pullAlgorithm] = pullAlgorithm;
         controller[slots.cancelAlgorithm] = cancelAlgorithm;
         controller[slots.autoAllocateChunkSize] = autoAllocateChunkSize;
-        controller[slots.pendingPullIntos] = [];
+        controller[slots.pendingPullIntos] = this.createNewEmptyList();
         stream[slots.controller] = controller;
         // Called synchrnonously, so exception thrown propagate immediately.
         Promise.resolve(startAlgorithm(controller)).then(() => {
@@ -975,10 +981,10 @@ const spec = {
         if (underlyingSourceDict.autoAllocateChunkSize != null) {
             autoAllocateChunkSize = underlyingSourceDict.autoAllocateChunkSize;
             if (!Number.isSafeInteger(autoAllocateChunkSize)) {
-                throw new TypeError(`The underlying source 'autoAllocateChunkSize' is not an integer.`);
+                throw this.createNewTypeError(`The underlying source 'autoAllocateChunkSize' is not an integer.`);
             }
             if (autoAllocateChunkSize <= 0) {
-                throw new TypeError(`The underlying source 'autoAllocateChunkSize' must be positive.`);
+                throw this.createNewTypeError(`The underlying source 'autoAllocateChunkSize' must be positive.`);
             }
         }
         this.setUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, autoAllocateChunkSize);
@@ -991,7 +997,7 @@ const spec = {
             throw TypeError(`Cannot use a BYOB reader with a non-byte stream`);
         }
         this.readableStreamReaderGenericInitialize(reader, stream);
-        reader[slots.readIntoRequests] = [];
+        reader[slots.readIntoRequests] = this.createNewEmptyList();
     },
     setUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, sizeAlgorithm) {
         assert?.(stream.controller != null);
@@ -1037,7 +1043,7 @@ const spec = {
             throw TypeError(`ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader`);
         }
         this.readableStreamReaderGenericInitialize(reader, stream);
-        reader[slots.readRequests] = [];
+        reader[slots.readRequests] = this.createNewEmptyList();
     },
     setUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm) {
         assert?.(stream instanceof WritableStream);
@@ -1085,6 +1091,15 @@ const spec = {
     },
     transferArrayBuffer(o) {
         return o;
+    },
+    writableStreamDealWithRejection(stream, error) {
+        const state = stream[slots.state];
+        if (state === 'writable') {
+            this.writableStreamStartErroring(stream, error);
+            return;
+        }
+        assert?.(state === 'erroring');
+        this.writableStreamFinishErroring(stream);
     },
     writableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
         if (!controller[slots.started]) {
@@ -1161,6 +1176,21 @@ const spec = {
             writer[slots.closedDefer].promise.catch(() => { });
         }
     },
+    writableStreamStartErroring(stream, reason) {
+        assert?.(stream[slots.storedError] == null);
+        assert?.(stream[slots.state] === 'writable');
+        const controller = stream[slots.controller];
+        assert?.(controller != null);
+        stream[slots.state] = 'erroring';
+        stream[slots.storedError] = reason;
+        const writer = stream[slots.writer];
+        if (writer != null) {
+            this.writableStreamDefaultWriterEnsureReadyPromiseRejected(writer, reason);
+        }
+        if (this.writableStreamHasOperationMarkedInFlight(stream) && controller[slots.started]) {
+            this.writableStreamFinishErroring(stream);
+        }
+    },
     writableStreamUpdateBackpressure(stream, backpressure) {
         assert?.(stream[slots.state] === 'writable');
         assert?.(!this.writableStreamCloseQueuedOrInFlight(stream));
@@ -1168,7 +1198,7 @@ const spec = {
         if (writer != null && backpressure !== stream[slots.backpressure]) {
             if (backpressure) {
                 const defer = writer[slots.readyDefer] = {};
-                defer.promise = new Promise((resolve, reject) => {
+                defer.promise = this.createNewPromise((resolve, reject) => {
                     defer.resolve = resolve;
                     defer.reject = reject;
                 });
@@ -1179,5 +1209,18 @@ const spec = {
         stream[slots.backpressure] = backpressure;
     }
 };
+
+const typedArrayTable = spec.typedArrayTable = new Map();
+typedArrayTable.set(Int8Array.prototype, Int8Array);
+typedArrayTable.set(Uint8Array.prototype, Uint8Array);
+typedArrayTable.set(Uint8ClampedArray.prototype, Uint8ClampedArray);
+typedArrayTable.set(Int16Array.prototype, Int16Array);
+typedArrayTable.set(Uint16Array.prototype, Uint16Array);
+typedArrayTable.set(Int32Array.prototype, Int32Array);
+typedArrayTable.set(Uint32Array.prototype, Uint32Array);
+typedArrayTable.set(BigInt64Array.prototype, BigInt64Array);
+typedArrayTable.set(BigUint64Array.prototype, BigUint64Array);
+typedArrayTable.set(Float32Array.prototype, Float32Array);
+typedArrayTable.set(Float64Array.prototype, Float64Array);
 
 export default spec;

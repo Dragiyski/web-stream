@@ -1,5 +1,5 @@
 {
-    "name": "@dragiyski/whatwg-stream",
+    "name": "@dragiyski/web-stream",
     "private": "true",
     "version": "0.0.1",
     "type": "module",
