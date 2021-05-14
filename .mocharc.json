@@ -1,0 +1,4 @@
+{
+    "spec": "test/mocha",
+    "recursive": true
+}
