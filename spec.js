@@ -257,7 +257,9 @@ const spec = {
         result.type = null;
     },
     makeUnderlyingSourceDict(source) {
-        const result = {};
+        const result = {
+            type: null
+        };
         if (source == null) {
             source = {};
         }
@@ -285,11 +287,36 @@ const spec = {
         {
             const type = source.type;
             if (type != null) {
-                if (type !== 'bytes') {
-                    throw this.createNewTypeError('Invalid `underlyingSource.type`: expected one of the following values: ["bytes"]');
-                }
                 result.type = type;
             }
+        }
+        return result;
+    },
+    makeUnderlyingTransformerDict(transformer) {
+        const result = {
+            readableType: null,
+            writableType: null
+        };
+        if (transformer == null) {
+            transformer = {};
+        }
+        if (transformer !== Object(transformer)) {
+            throw this.createNewTypeError('`underlyingTransformer` is not an object');
+        }
+        for (const name of ['start', 'transform', 'flush']) {
+            const value = transformer[name];
+            if (value != null) {
+                if (typeof value !== 'function') {
+                    throw this.createNewTypeError(`\`underlyingTransformer.${name}\` is not a function`);
+                }
+                result[name] = transformer[name];
+            }
+        }
+        if (transformer.readableType != null) {
+            result.readableType = transformer.readableType;
+        }
+        if (transformer.readableType != null) {
+            result.writableType = transformer.writableType;
         }
         return result;
     },
