@@ -200,6 +200,10 @@ const spec = {
         stream[slots.reader] = stream[slots.storedError] = null;
         stream[slots.disturbed] = false;
     },
+    initializeTransformStream(stream, startAsync, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm) {
+        const startAlgorithm = () => startAsync.promise;
+        const writeAlgorithm = chunk => this.transformStreamDefaultSinkWriteAlgorithm(stream, chunk);
+    },
     initializeWritableStream(stream) {
         stream[slots.state] = 'writable';
         stream[slots.storedError] = null;
@@ -1312,6 +1316,33 @@ const spec = {
     },
     transferArrayBuffer(o) {
         return o;
+    },
+    transformStreamDefaultControllerPerformTransform(controller, chunk) {
+        return (0, controller[slots.transformAlgorithm])(chunk).catch(r => {
+            this.TransformStreamError(controller[slots.stream], r);
+            throw r;
+        });
+    },
+    async transformStreamDefaultSinkAbortAlgorithm(stream, reason) {
+        this.transformStreamError(stream, reason);
+    },
+    transformStreamDefaultSinkWriteAlgorithm(stream, chunk) {
+        assert?.(stream[slots.writable][slots.state] === 'writable');
+        const controller = stream[slots.controller];
+        if (stream[slots.backpressure]) {
+            const backpressureChangePromise = stream[slots.backpressureChangePromise];
+            assert?.(backpressureChangePromise != null);
+            return backpressureChangePromise.then(() => {
+                const writable = stream[slots.writable];
+                const state = writable[slots.state];
+                if (state === 'erroring') {
+                    throw writable[slots.storedError];
+                }
+                assert?.(state === 'writable');
+                return this.transformStreamDefaultControllerPerformTransform(controller, chunk);
+            });
+        }
+        return this.transformStreamDefaultControllerPerformTransform(controller, chunk);
     },
     async writableStreamAbort(stream, reason) {
         const state = stream[slots.state];

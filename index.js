@@ -574,6 +574,19 @@ export class WritableStreamDefaultController {
 }
 
 export class TransformStream {
+    constructor(transformer, writableStrategy, readableStrategy) {
+        if (writableStrategy == null) {
+            writableStrategy = {};
+        }
+        if (readableStrategy == null) {
+            readableStrategy = {};
+        }
+        const transformerDict = spec.makeUnderlyingTransformerDict(transformer);
+        const readableHighWaterMark = spec.extractHighWaterMark(readableStrategy, 0);
+        const readableSizeAlgorithm = spec.extractSizeAlgorithm(readableStrategy);
+        const writableHighWaterMark = spec.extractHighWaterMark(readableStrategy, 0);
+        const writableSizeAlgorithm = spec.extractSizeAlgorithm(readableStrategy, 0);
+    }
 }
 
 export class TransformStreamDefaultController {

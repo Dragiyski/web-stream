@@ -3,6 +3,7 @@ export default {
     abortSteps: Symbol('abortSteps'),
     autoAllocateChunkSize: Symbol('autoAllocateChunkSize'),
     backpressure: Symbol('backpressure'),
+    backpressureChangePromise: Symbol('backpressureChangePromise'),
     byobRequest: Symbol('byobRequest'),
     cancelAlgorithm: Symbol('cancelAlgorithm'),
     cancelSteps: Symbol('cancelSteps'),
@@ -15,6 +16,7 @@ export default {
     disturbed: Symbol('disturbed'),
     errorSteps: Symbol('errorSteps'),
     finished: Symbol('finished'),
+    flushAlgorithm: Symbol('flushAlgorithm'),
     inFlightWriteRequest: Symbol('inFlightWriteRequest'),
     inFlightCloseRequest: Symbol('inFlightCloseRequest'),
     pendingAbortRequest: Symbol('pendingAbortRequest'),
@@ -27,6 +29,7 @@ export default {
     pulling: Symbol('pulling'),
     queue: Symbol('queue'),
     queueTotalSize: Symbol('queueTotalSize'),
+    readable: Symbol('readable'),
     reader: Symbol('reader'),
     readIntoRequests: Symbol('readIntoRequests'),
     readRequests: Symbol('readRequests'),
@@ -37,8 +40,10 @@ export default {
     strategyHWM: Symbol('strategyHWM'),
     strategySizeAlgorithm: Symbol('strategySizeAlgorithm'),
     stream: Symbol('stream'),
+    transformAlgorithm: Symbol('transformAlgorithm'),
     view: Symbol('view'),
     writer: Symbol('writer'),
     writeAlgorithm: Symbol('writeAlgorithm'),
-    writeRequests: Symbol('writeRequests')
+    writeRequests: Symbol('writeRequests'),
+    writable: Symbol('writable')
 };
