@@ -150,7 +150,7 @@ const spec = {
     enqueueValueWithSize(container, value, size) {
         assert?.(slots.queue in container && slots.queueTotalSize in container);
         if (!isFinite(size) || size < 0) {
-            throw RangeError(`The return value of a queuing strategy's size function must be a finite, non-NaN, non-negative number`);
+            throw this.createNewRangeError(`The return value of a queuing strategy's size function must be a finite, non-NaN, non-negative number`);
         }
         container[slots.queue].push({ value, size });
         container[slots.queueTotalSize] += size;
@@ -352,7 +352,7 @@ const spec = {
         result.readableType = transformer.readableType ?? null;
         result.writableType = transformer.writableType ?? null;
         if (!this.isTransformerSupportedTypes(readableType, writableType)) {
-            throw new RangeError('The `readableType` and `writableType` options are not currently supported and should not exists or set to null/undefined');
+            throw this.createNewRangeError('The `readableType` and `writableType` options are not currently supported and should not exists or set to null/undefined');
         }
         return result;
     },
@@ -1258,10 +1258,10 @@ const spec = {
     },
     setUpReadableStreamBYOBReader(stream, reader) {
         if (this.isReadableStreamLocked(stream)) {
-            throw TypeError(`ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader`);
+            throw this.createNewTypeError(`ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader`);
         }
         if (!(stream[slots.controller] instanceof ReadableByteStreamController)) {
-            throw TypeError(`Cannot use a BYOB reader with a non-byte stream`);
+            throw this.createNewTypeError(`Cannot use a BYOB reader with a non-byte stream`);
         }
         this.readableStreamReaderGenericInitialize(reader, stream);
         reader[slots.readIntoRequests] = [3];
@@ -1307,7 +1307,7 @@ const spec = {
     },
     setUpReadableStreamDefaultReader(stream, reader) {
         if (this.isReadableStreamLocked(stream)) {
-            throw TypeError(`ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader`);
+            throw this.createNewTypeError(`ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader`);
         }
         this.readableStreamReaderGenericInitialize(reader, stream);
         reader[slots.readRequests] = [];
