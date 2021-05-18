@@ -3,7 +3,7 @@ export default {
     abortSteps: Symbol('abortSteps'),
     autoAllocateChunkSize: Symbol('autoAllocateChunkSize'),
     backpressure: Symbol('backpressure'),
-    backpressureChangePromise: Symbol('backpressureChangePromise'),
+    backpressureChangeAsync: Symbol('backpressureChangeAsync'),
     byobRequest: Symbol('byobRequest'),
     cancelAlgorithm: Symbol('cancelAlgorithm'),
     cancelSteps: Symbol('cancelSteps'),

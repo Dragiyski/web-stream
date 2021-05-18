@@ -3,10 +3,12 @@ import slots from './slots.js';
 import {
     ReadableStream,
     WritableStream,
+    TransformStream,
     ReadableStreamDefaultReader,
     ReadableStreamBYOBReader,
     ReadableStreamDefaultController,
     ReadableByteStreamController,
+    TransformStreamDefaultController,
     WritableStreamDefaultController,
     WritableStreamDefaultWriter
 } from './index.js';
@@ -155,21 +157,18 @@ const spec = {
     },
     ensureReadableWritablePair(transform) {
         if (transform !== Object(transform)) {
-            throw spec.createNewTypeError('Invalid transform: cannot convert to dictionary');
+            throw spec.createNewTypeError('Invalid transform: not an object');
         }
         const missing = [];
-        const interfaceObject = {
-            readable: ReadableStream,
-            writable: WritableStream
-        };
-        for (const member of Object.keys(interfaceObject)) {
-            if (member in transform) {
-                if (!(member instanceof interfaceObject[member])) {
-                    throw spec.createNewTypeError(`Invalid transform: member \`${member}\` is not a \`${interfaceObject[member].name}\``);
-                }
-            } else {
-                missing.push(member);
-            }
+        if (!('readable' in transform)) {
+            missing.push('readable');
+        } else if (!this.isReadableStream(transform.readable)) {
+            throw spec.createNewTypeError('Invalid transform: member `readable` is not a `ReadableStream`');
+        }
+        if (!('writable' in transform)) {
+            missing.push('writable');
+        } else if (!this.isWritableStream(transform.writable)) {
+            throw spec.createNewTypeError('Invalid transform: member `writable` is not a `WritableStream`');
         }
         if (missing.length > 0) {
             throw spec.createNewTypeError(`Invalid transform: missing required member: ${missing.join(', ')}`);
@@ -203,6 +202,16 @@ const spec = {
     initializeTransformStream(stream, startAsync, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm) {
         const startAlgorithm = () => startAsync.promise;
         const writeAlgorithm = chunk => this.transformStreamDefaultSinkWriteAlgorithm(stream, chunk);
+        const abortAlgorithm = reason => this.transformStreamDefaultSinkAbortAlgorithm(stream, reason);
+        const closeAlgorithm = () => this.transformStreamDefaultSinkCloseAlgorithm(stream);
+        stream[slots.writable] = this.createWritableStream(startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, writableHighWaterMark, writableSizeAlgorithm);
+        const pullAlgorithm = () => this.transformStreamDefaultSourcePullAlgorithm(stream);
+        const cancelAlgorithm = async reason => { this.transformStreamErrorWritableAndUnblockWrite(stream, reason); };
+        stream[slots.readable] = this.createReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+        stream[slots.backpressure] = null;
+        stream[slots.backpressureChangeAsync] = null;
+        this.transformStreamSetBackpressure(stream, true);
+        stream[slots.controller] = null;
     },
     initializeWritableStream(stream) {
         stream[slots.state] = 'writable';
@@ -237,8 +246,26 @@ const spec = {
         }
         return typeof descriptors.aborted.get === 'function' && descriptors.addEventListener.value === 'function' && descriptors.removeEventListener.value === 'function';
     },
+    isReadableStream(maybeStream) {
+        return maybeStream instanceof ReadableStream;
+    },
     isReadableStreamLocked(stream) {
         return stream[slots.reader] != null;
+    },
+    isTransformStream(maybeStream) {
+        return maybeStream instanceof TransformStream;
+    },
+    isTransformerSupportedTypes(readableType, writableType) {
+        return readableType == null && writableType == null;
+    },
+    isUnderlyingSourceSupportedType(type) {
+        return type == null || type === 'bytes';
+    },
+    isUnderlyingSinkSupportedType(type) {
+        return type == null;
+    },
+    isWritableStream(maybeStream) {
+        return maybeStream instanceof WritableStream;
     },
     isWritableStreamLocked(stream) {
         return stream[slots.writer] != null;
@@ -257,8 +284,13 @@ const spec = {
                 result[name] = value;
             }
         }
-        // Ignore "type" (specs says "any attempts to supply a value will throw an exception", but we just ignore it.
-        result.type = null;
+        const type = sink.type;
+        if (type != null) {
+            if (!this.isUnderlyingSinkSupportedType(type)) {
+                throw this.createNewTypeError('Invalid `underlyingSink.type`: the specified type is not supported');
+            }
+            result.type = type;
+        }
     },
     makeUnderlyingSourceDict(source) {
         const result = {
@@ -288,11 +320,12 @@ const spec = {
                 result.autoAllocateChunkSize = autoAllocateChunkSize;
             }
         }
-        {
-            const type = source.type;
-            if (type != null) {
-                result.type = type;
-            }
+        const type = source.type;
+        if (!this.isUnderlyingSourceSupportedType(source.type)) {
+            throw this.createNewTypeError('Invalid `underlyingSource.type`: the specified type is not supported');
+        }
+        if (type != null) {
+            result.type = type;
         }
         return result;
     },
@@ -316,11 +349,10 @@ const spec = {
                 result[name] = transformer[name];
             }
         }
-        if (transformer.readableType != null) {
-            result.readableType = transformer.readableType;
-        }
-        if (transformer.readableType != null) {
-            result.writableType = transformer.writableType;
+        result.readableType = transformer.readableType ?? null;
+        result.writableType = transformer.writableType ?? null;
+        if (!this.isTransformerSupportedTypes(readableType, writableType)) {
+            throw new RangeError('The `readableType` and `writableType` options are not currently supported and should not exists or set to null/undefined');
         }
         return result;
     },
@@ -826,6 +858,30 @@ const spec = {
         this.readableStreamClose(stream);
         await stream[slots.controller][slots.cancelSteps](reason);
     },
+    readableStreamContruct(stream, source = null, strategy = {}) {
+        const sourceDict = this.makeUnderlyingSourceDict(source);
+        if (strategy == null) {
+            strategy = {};
+        }
+        if (strategy !== Object(strategy)) {
+            throw this.createNewTypeError('Invalid strategy: not an object');
+        }
+        this.initializeReadableStream(stream);
+        this.readableStreamContructByType(stream, sourceDict, source, strategy);
+    },
+    readableStreamContructByType(stream, sourceDict, source, strategy) {
+        if (sourceDict.type === 'bytes') {
+            if (strategy.size != null) {
+                throw this.createNewRangeError(`The strategy for a byte stream cannot have a size function`);
+            }
+            const highWaterMark = this.extractHighWaterMark(strategy, 0);
+            this.setUpReadableByteStreamControllerFromUnderlyingSource(stream, source, sourceDict, highWaterMark);
+        } else {
+            const sizeAlgorithm = this.extractSizeAlgorithm(strategy);
+            const highWaterMark = this.extractHighWaterMark(strategy, 1);
+            this.setUpReadableStreamDefaultControllerFromUnderlyingSource(stream, source, sourceDict, highWaterMark, sizeAlgorithm);
+        }
+    },
     readableStreamClose(stream) {
         assert?.(stream[slots.state] === 'readable');
         stream[slots.state] = 'closed';
@@ -1011,6 +1067,22 @@ const spec = {
     readableStreamGetNumReadRequests(stream) {
         assert?.(this.readableStreamHasDefaultReader(stream) === true);
         return stream[slots.reader][slots.readRequests].length;
+    },
+    readableStreamGetReader(stream, options = {}) {
+        if (options == null) {
+            options = {};
+        } else if (options !== Object(options)) {
+            throw this.createNewTypeError('Invalid options: cannot convert to dictionary');
+        }
+        const mode = options.mode;
+        let byob = false;
+        if (mode != null) {
+            if (mode !== 'byob') {
+                throw this.createNewTypeError(`The option [mode] must be exactly the string "byob", if present`);
+            }
+            byob = true;
+        }
+        return byob ? this.acquireReadableStreamBYOBReader(stream) : this.acquireReadableStreamDefaultReader(stream);
     },
     readableStreamHasBYOBReader(stream) {
         const reader = stream[slots.reader];
@@ -1240,6 +1312,28 @@ const spec = {
         this.readableStreamReaderGenericInitialize(reader, stream);
         reader[slots.readRequests] = [];
     },
+    setUpTransformStreamDefaultController(stream, controller, transformAlgorithm, flushAlgorithm) {
+        assert?.(this.isTransformStream(stream));
+        assert?.(stream[slots.controller] == null);
+        controller[slots.stream] = stream;
+        stream[slots.controller] = controller;
+        controller[slots.transformAlgorithm] = transformAlgorithm;
+        controller[slots.flushAlgorithm] = flushAlgorithm;
+    },
+    setUpTransformStreamDefaultControllerFromTransformer(stream, transformer, transformerDict) {
+        const controller = Object.create(TransformStreamDefaultController.prototype);
+        let transformAlgorithm = async chunk => {
+            this.transformStreamDefaultControllerEnqueue(controller, chunk);
+        };
+        let flushAlgorithm = async () => {};
+        if (transformerDict.transform != null) {
+            transformAlgorithm = async chunk => transformerDict.transform.call(transformer, chunk, controller);
+        }
+        if (transformerDict.flush != null) {
+            flushAlgorithm = async () => transformerDict.flush.call(transformer, controller);
+        }
+        this.setUpTransformStreamDefaultController(stream, controller, transformAlgorithm, flushAlgorithm);
+    },
     setUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm) {
         assert?.(stream instanceof WritableStream);
         assert?.(stream[slots.controller] == null);
@@ -1317,6 +1411,35 @@ const spec = {
     transferArrayBuffer(o) {
         return o;
     },
+    transformStreamConstruct(stream, transformer, writableStrategy, readableStrategy) {
+        if (transformer == null) {
+            transformer = {};
+        }
+        if (transformer !== Object(transformer)) {
+            throw this.createNewTypeError('Invalid transformer: not an object');
+        }
+        if (writableStrategy == null) {
+            writableStrategy = {};
+        }
+        if (writableStrategy !== Object(writableStrategy)) {
+            throw this.createNewTypeError('Invalid writableStrategy: not an object');
+        }
+        if (readableStrategy == null) {
+            readableStrategy = {};
+        }
+        if (readableStrategy !== Object(readableStrategy)) {
+            throw this.createNewTypeError('Invalid readableStrategy: not an object');
+        }
+        const transformerDict = this.makeUnderlyingTransformerDict(transformer);
+        const readableHighWaterMark = this.extractHighWaterMark(readableStrategy, 0);
+        const readableSizeAlgorithm = this.extractSizeAlgorithm(readableStrategy);
+        const writableHighWaterMark = this.extractHighWaterMark(writableStrategy, 1);
+        const writableSizeAlgorithm = this.extractSizeAlgorithm(writableStrategy);
+
+        const startAsync = this.createAsync();
+        this.initializeTransformStream(stream, startAsync, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+        this.setUpTransformStreamDefaultControllerFromTransformer(stream, transformer, transformerDict);
+    },
     transformStreamDefaultControllerPerformTransform(controller, chunk) {
         return (0, controller[slots.transformAlgorithm])(chunk).catch(r => {
             this.TransformStreamError(controller[slots.stream], r);
@@ -1326,13 +1449,38 @@ const spec = {
     async transformStreamDefaultSinkAbortAlgorithm(stream, reason) {
         this.transformStreamError(stream, reason);
     },
+    transformStreamDefaultControllerClearAlgorithms(controller) {
+        controller[slots.transformAlgorithm] = null;
+        controller[slots.flushAlgorithm] = null;
+    },
+    transformStreamDefaultSourcePullAlgorithm(stream) {
+        assert?.(stream[slots.backpressure] === true);
+        assert?.(stream[slots.backpressureChangeAsync] != null);
+        this.transformStreamSetBackpressure(stream, false);
+        return stream[slots.backpressureChangeAsync].promise;
+    },
+    transformStreamDefaultSinkCloseAlgorithm(stream) {
+        const readable = stream[slots.readable];
+        const controller = stream[slots.controller];
+        const flushAsync = controller[slots.flushAsync];
+        this.transformStreamDefaultControllerClearAlgorithms(controller);
+        return flushAsync.promise.then(() => {
+            if (readable[slots.state] === 'errored') {
+                throw readable[slots.storedError];
+            }
+            this.readableStreamDefaultControllerClose(readable[slots.controller]);
+        }, r => {
+            this.transformStreamError(stream, r);
+            throw readable[slots.storedError];
+        });
+    },
     transformStreamDefaultSinkWriteAlgorithm(stream, chunk) {
         assert?.(stream[slots.writable][slots.state] === 'writable');
         const controller = stream[slots.controller];
         if (stream[slots.backpressure]) {
-            const backpressureChangePromise = stream[slots.backpressureChangePromise];
-            assert?.(backpressureChangePromise != null);
-            return backpressureChangePromise.then(() => {
+            const backpressureChangeAsync = stream[slots.backpressureChangeAsync];
+            assert?.(backpressureChangeAsync != null);
+            return backpressureChangeAsync.promise.then(() => {
                 const writable = stream[slots.writable];
                 const state = writable[slots.state];
                 if (state === 'erroring') {
@@ -1343,6 +1491,21 @@ const spec = {
             });
         }
         return this.transformStreamDefaultControllerPerformTransform(controller, chunk);
+    },
+    transformStreamErrorWritableAndUnblockWrite(stream, e) {
+        this.transformStreamDefaultControllerClearAlgorithms(stream[slots.controller]);
+        this.writableStreamDefaultControllerErrorIfNeeded(stream[slots.writable][slots.controller], e);
+        if (stream[slots.backpressure]) {
+            this.transformStreamSetBackpressure(stream, false);
+        }
+    },
+    transformStreamSetBackpressure(stream, backpressure) {
+        assert?.(stream[slots.backpressure] !== backpressure);
+        if (stream[slots.backpressureChangeAsync] != null) {
+            stream[slots.backpressureChangeAsync].fulfill();
+        }
+        stream[slots.backpressureChangeAsync] = this.createAsync();
+        stream[slots.backpressure] = backpressure;
     },
     async writableStreamAbort(stream, reason) {
         const state = stream[slots.state];
@@ -1388,6 +1551,22 @@ const spec = {
         }
         this.writableStreamDefaultControllerClose(stream[slots.controller]);
         return closeAsync.promise;
+    },
+    writableStreamConstruct(stream, sink = null, strategy = {}) {
+        const sinkDict = this.makeUnderlyingSinkDict(sink);
+        if (strategy == null) {
+            strategy = {};
+        }
+        if (strategy !== Object(strategy)) {
+            throw this.createNewTypeError('Invalid strategy: not an object');
+        }
+        this.initializeWritableStream(stream);
+        this.writableStreamConstructByType(stream, sinkDict, sink, strategy);
+    },
+    writableStreamConstructByType(stream, sinkDict, sink, strategy) {
+        const sizeAlgorithm = this.extractSizeAlgorithm(strategy);
+        const highWaterMark = this.extractHighWaterMark(strategy, 1);
+        this.setUpWritableStreamDefaultControllerFromUnderlyingSink(stream, sink, sinkDict, highWaterMark, sizeAlgorithm);
     },
     writableStreamCloseQueuedOrInFlight(stream) {
         return stream[slots.closeRequest] != null || stream[slots.inFlightCloseRequest] != null;

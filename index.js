@@ -4,22 +4,7 @@ import spec from './spec.js';
 
 export class ReadableStream {
     constructor(underlyingSource = null, strategy = {}) {
-        const underlyingSourceDict = spec.makeUnderlyingSourceDict(underlyingSource);
-        if (strategy == null) {
-            strategy = {};
-        }
-        spec.initializeReadableStream(this);
-        if (underlyingSourceDict.type === 'bytes') {
-            if (strategy.size != null) {
-                throw spec.createNewRangeError(`The strategy for a byte stream cannot have a size function`);
-            }
-            const highWaterMark = spec.extractHighWaterMark(strategy, 0);
-            spec.setUpReadableByteStreamControllerFromUnderlyingSource(this, underlyingSource, underlyingSourceDict, highWaterMark);
-        } else {
-            const sizeAlgorithm = spec.extractSizeAlgorithm(strategy);
-            const highWaterMark = spec.extractHighWaterMark(strategy, 1);
-            spec.setUpReadableStreamDefaultControllerFromUnderlyingSource(this, underlyingSource, underlyingSourceDict, highWaterMark, sizeAlgorithm);
-        }
+        spec.readableStreamContruct(this, underlyingSource, strategy);
     }
 
     get locked() {
@@ -34,29 +19,15 @@ export class ReadableStream {
     }
 
     getReader(options = {}) {
-        if (options == null) {
-            options = {};
-        } else if (options !== Object(options)) {
-            throw spec.createNewTypeError('Invalid options: cannot convert to dictionary');
-        }
-        const mode = options.mode;
-        let byob = false;
-        if (mode != null) {
-            if (mode !== 'byob') {
-                throw spec.createNewTypeError(`The option [mode] must be exactly the string "byob", if present`);
-            }
-            byob = true;
-        }
-        return byob ? spec.acquireReadableStreamBYOBReader(this) : spec.acquireReadableStreamDefaultReader(this);
+        return spec.readableStreamGetReader(this, options);
     }
 
     pipeThrough(transform, options) {
         spec.ensureReadableWritablePair(transform);
         if (options == null) {
             options = {};
-        }
-        if (options !== Object(options)) {
-            throw spec.createNewTypeError('Invalid options: cannot convert to dictionary');
+        } else if (options !== Object(options)) {
+            throw spec.createNewTypeError('Invalid options: not an object');
         }
         const signal = options.signal;
         if (signal != null) {
@@ -78,12 +49,12 @@ export class ReadableStream {
     }
 
     pipeTo(destination, options) {
-        if (options != null || options !== Object(options)) {
-            throw spec.createNewTypeError('Invalid options: cannot convert to dictionary');
-        } else if (options == null) {
+        if (options == null) {
             options = {};
+        } else if (options !== Object(options)) {
+            throw spec.createNewTypeError('Invalid options: not an object');
         }
-        if (!(destination instanceof WritableStream)) {
+        if (!(spec.isWritableStream(destination))) {
             throw spec.createNewTypeError('Invalid destination: not an instance of WritableStream');
         }
         if (spec.isReadableStreamLocked(this)) {
@@ -135,6 +106,7 @@ export function ReadableStreamGenericReader(Class) {
                 if (this[slots.stream] == null) {
                     throw spec.createNewTypeError(`This readable stream reader has been released and cannot be used to monitor the stream's state`);
                 }
+                spec.readableStreamReaderGenericCancel(this, reason);
             }
         }
     });
@@ -166,7 +138,7 @@ Object.defineProperties(ReadableStreamGenericReader, {
 
 export class ReadableStreamDefaultReader {
     constructor(stream) {
-        if (!(stream instanceof ReadableStream)) {
+        if (!spec.isReadableStream(stream)) {
             throw spec.createNewTypeError('Parameter 1 is not of type `ReadableStream`.');
         }
         spec.setUpReadableStreamDefaultReader(this, stream);
@@ -176,26 +148,16 @@ export class ReadableStreamDefaultReader {
         if (this[slots.stream] == null) {
             throw spec.createNewTypeError(`Illegal invocation`);
         }
-        const readRequest = {
-            chunkSteps(chunk) {
-                this.resolve({
-                    value: chunk,
-                    done: false
-                });
+        const readRequest = spec.createAsync({
+            chunkSteps: chunk => {
+                readRequest.fulfill({ value: chunk, done: false });
             },
-            closeSteps() {
-                this.resolve({
-                    value: undefined,
-                    done: true
-                });
+            closeSteps: () => {
+                readRequest.fulfill({ value: undefined, done: true });
             },
-            errorSteps(e) {
-                this.reject(e);
+            errorSteps: e => {
+                readRequest.reject(e);
             }
-        };
-        readRequest.promise = new Promise((resolve, reject) => {
-            readRequest.resolve = resolve;
-            readRequest.reject = reject;
         });
         spec.readableStreamDefaultReaderRead(this, readRequest);
         return readRequest.promise;
@@ -216,7 +178,7 @@ ReadableStreamGenericReader(ReadableStreamDefaultReader);
 
 export class ReadableStreamBYOBReader {
     constructor(stream) {
-        if (!(stream instanceof ReadableStream)) {
+        if (!spec.isReadableStream(stream)) {
             throw spec.createNewTypeError(`Parameter 1 is not of type 'ReadableStream'.`);
         }
         spec.setUpReadableStreamBYOBReader(this, stream);
@@ -235,26 +197,16 @@ export class ReadableStreamBYOBReader {
         if (this[slots.stream] == null) {
             throw spec.createNewTypeError(`This readable stream reader has been released and cannot be used to read from its previous owner stream`);
         }
-        const readIntoRequest = {
-            chunkSteps(chunk) {
-                this.resolve({
-                    value: chunk,
-                    done: false
-                });
+        const readIntoRequest = spec.createAsync({
+            chunkSteps: chunk => {
+                readIntoRequest.fulfill({ value: chunk, done: false });
             },
-            closeSteps(chunk) {
-                this.resolve({
-                    value: chunk,
-                    done: true
-                });
+            closeSteps: chunk => {
+                readIntoRequest.fulfill({ value: chunk, done: true });
             },
-            errorSteps(e) {
-                this.reject(e);
+            errorSteps: e => {
+                readIntoRequest.reject(e);
             }
-        };
-        readIntoRequest.promise = new Promise((resolve, reject) => {
-            readIntoRequest.resolve = resolve;
-            readIntoRequest.reject = reject;
         });
         spec.readableStreamBYOBReaderRead(this, view, readIntoRequest);
         return readIntoRequest.promise;
@@ -454,19 +406,7 @@ export class ReadableStreamBYOBRequest {
 
 export class WritableStream {
     constructor(underlyingSink = null, strategy = {}) {
-        const underlyingSinkDict = spec.makeUnderlyingSinkDict(underlyingSink);
-        if (strategy == null) {
-            strategy = {};
-        } else if (strategy !== Object(strategy)) {
-            throw spec.createNewTypeError(`Expected startegy to be an object, if specified`);
-        }
-        if (underlyingSinkDict.type != null) {
-            throw spec.createNewRangeError(`Invalid type is specified`);
-        }
-        spec.initializeWritableStream(this);
-        const sizeAlgorithm = spec.extractSizeAlgorithm(strategy);
-        const highWaterMark = spec.extractHighWaterMark(strategy, 1);
-        spec.setUpWritableStreamDefaultControllerFromUnderlyingSink(this, underlyingSink, underlyingSinkDict, highWaterMark, sizeAlgorithm);
+        spec.writableStreamConstruct(this, underlyingSink, strategy);
     }
 
     get locked() {
@@ -497,7 +437,7 @@ export class WritableStream {
 
 export class WritableStreamDefaultWriter {
     constructor(stream) {
-        if (!(stream instanceof WritableStream)) {
+        if (!spec.isWritableStream(stream)) {
             throw spec.createNewTypeError('Parameter 1 is not of type `WritableStream`.');
         }
         spec.setUpWritableStreamDefaultWriter(this, stream);
@@ -574,18 +514,8 @@ export class WritableStreamDefaultController {
 }
 
 export class TransformStream {
-    constructor(transformer, writableStrategy, readableStrategy) {
-        if (writableStrategy == null) {
-            writableStrategy = {};
-        }
-        if (readableStrategy == null) {
-            readableStrategy = {};
-        }
-        const transformerDict = spec.makeUnderlyingTransformerDict(transformer);
-        const readableHighWaterMark = spec.extractHighWaterMark(readableStrategy, 0);
-        const readableSizeAlgorithm = spec.extractSizeAlgorithm(readableStrategy);
-        const writableHighWaterMark = spec.extractHighWaterMark(readableStrategy, 0);
-        const writableSizeAlgorithm = spec.extractSizeAlgorithm(readableStrategy, 0);
+    constructor(transformer = null, writableStrategy = {}, readableStrategy = {}) {
+        spec.transformStreamConstruct(this, transformer, writableStrategy, readableStrategy);
     }
 }
 
