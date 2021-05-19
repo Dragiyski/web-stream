@@ -1091,6 +1091,9 @@ const spec = {
         }
         return reader instanceof ReadableStreamBYOBReader;
     },
+    readableStreamDefaultControllerHasBackpressure(controller) {
+        return !this.readableStreamDefaultControllerShouldCallPull(controller);
+    },
     readableStreamHasDefaultReader(stream) {
         const reader = stream[slots.reader];
         if (reader == null) {
@@ -1440,11 +1443,39 @@ const spec = {
         this.initializeTransformStream(stream, startAsync, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
         this.setUpTransformStreamDefaultControllerFromTransformer(stream, transformer, transformerDict);
     },
+    transformStreamDefaultControllerEnqueue(controller, chunk) {
+        const stream = controller[slots.stream];
+        const readableController = stream[slots.readable][slots.controller];
+        if (!this.readableStreamDefaultControllerCanCloseOrEnqueue(readableController)) {
+            throw this.createNewTypeError('Readable side is not in a state that permits enqueue');
+        }
+        try {
+            this.readableStreamDefaultControllerEnqueue(readableController, chunk);
+        } catch (error) {
+            this.transformStreamErrorWritableAndUnblockWrite(stream, error);
+            throw stream[slots.storedError];
+        }
+        const backpressure = this.readableStreamDefaultControllerHasBackpressure(readableController);
+        if (backpressure !== stream[slots.backpressure]) {
+            assert?.(backpressure === true);
+            this.transformStreamSetBackpressure(stream, true);
+        }
+    },
+    transformStreamDefaultControllerError(controller, e) {
+        this.transformStreamError(controller[slots.stream], e);
+    },
     transformStreamDefaultControllerPerformTransform(controller, chunk) {
         return (0, controller[slots.transformAlgorithm])(chunk).catch(r => {
             this.TransformStreamError(controller[slots.stream], r);
             throw r;
         });
+    },
+    transformStreamDefaultControllerTerminate(controller) {
+        const stream = controller[slots.stream];
+        const readableController = stream[slots.readable][slots.controller];
+        this.readableStreamDefaultControllerClose(readableController);
+        const error = this.createNewTypeError('TransformStream terminated');
+        this.transformStreamErrorWritableAndUnblockWrite(stream, error);
     },
     async transformStreamDefaultSinkAbortAlgorithm(stream, reason) {
         this.transformStreamError(stream, reason);

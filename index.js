@@ -517,9 +517,29 @@ export class TransformStream {
     constructor(transformer = null, writableStrategy = {}, readableStrategy = {}) {
         spec.transformStreamConstruct(this, transformer, writableStrategy, readableStrategy);
     }
+
+    get readable() {
+        return this[slots.readable];
+    }
+
+    get writable() {
+        return this[slots.writable];
+    }
 }
 
 export class TransformStreamDefaultController {
+    get desiredSize() {
+        const readableController = this[slots.stream][slots.readable][slots.controller];
+        return spec.readableStreamDefaultControllerGetDesiredSize(readableController);
+    }
+
+    enqueue(chunk) {
+        spec.transformStreamDefaultControllerEnqueue(this, chunk);
+    }
+
+    error(e) {
+        spec.transformStreamDefaultControllerError(this, e);
+    }
 }
 
 export class ByteLengthQueuingStrategy {
