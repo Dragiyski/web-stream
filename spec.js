@@ -124,7 +124,7 @@ const spec = {
         if (sizeAlgorithm == null) {
             sizeAlgorithm = () => 1;
         }
-        assert?.(Number.isSafeInteger(highWaterMark) && highWaterMark >= 0);
+        assert?.(!Number.isNaN(highWaterMark) && highWaterMark >= 0);
         const stream = Object.create(ReadableStream.prototype);
         this.initializeReadableStream(stream);
         const controller = Object.create(ReadableStreamDefaultController.prototype);
@@ -132,7 +132,7 @@ const spec = {
         return stream;
     },
     createWritableStream(startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm) {
-        assert?.(Number.isSafeInteger(highWaterMark) && highWaterMark >= 0);
+        assert?.(!Number.isNaN(highWaterMark) && highWaterMark >= 0);
         const stream = Object.create(WritableStream.prototype);
         this.initializeWritableStream(stream);
         const controller = Object.create(WritableStreamDefaultController.prototype);
@@ -179,8 +179,8 @@ const spec = {
             return defaultHWM;
         }
         const highWaterMark = Number(strategy.highWaterMark);
-        if (!Number.isSafeInteger(highWaterMark) || highWaterMark < 0) {
-            throw this.createNewRangeError('Invalid `strategy.highWaterMark`, expected valid non-negative integer');
+        if (Number.isNaN(highWaterMark) || highWaterMark < 0) {
+            throw this.createNewRangeError('Invalid `strategy.highWaterMark`, expected non-negative number');
         }
         return highWaterMark;
     },
@@ -351,7 +351,7 @@ const spec = {
         }
         result.readableType = transformer.readableType ?? null;
         result.writableType = transformer.writableType ?? null;
-        if (!this.isTransformerSupportedTypes(readableType, writableType)) {
+        if (!this.isTransformerSupportedTypes(result.readableType, result.writableType)) {
             throw this.createNewRangeError('The `readableType` and `writableType` options are not currently supported and should not exists or set to null/undefined');
         }
         return result;
@@ -1094,67 +1094,22 @@ const spec = {
     readableStreamDefaultControllerHasBackpressure(controller) {
         return !this.readableStreamDefaultControllerShouldCallPull(controller);
     },
-    readableStreamHasDefaultReader(stream) {
-        const reader = stream[slots.reader];
-        if (reader == null) {
-            return false;
-        }
-        return reader instanceof ReadableStreamDefaultReader;
-    },
-    readableStreamPipeIsOrBecomesErrored(stream, promise, action) {
-        if (stream[slots.state] === 'errored') {
-            action(stream[slots.storedError]);
-        } else {
-            promise.catch(action);
-        }
-    },
-    readableStreamPipeIsOrBecomesClosed(stream, promise, action) {
-        if (stream[slots.state] === 'closed') {
-            action();
-        } else {
-            promise.then(action);
-        }
-    },
     async readableStreamPipeTo(source, dest, preventClose, preventAbort, preventCancel, signal) {
         assert?.(source instanceof ReadableStream);
         assert?.(dest instanceof WritableStream);
         assert?.(typeof preventClose === 'boolean');
         assert?.(typeof preventAbort === 'boolean');
         assert?.(typeof preventCancel === 'boolean');
-        assert?.(
-            signal == null ||
-            typeof signal === 'object' &&
-            'aborted' in signal &&
-            typeof signal.addEventListener === 'function' &&
-            typeof signal.removeEventListener === 'function'
-        );
+        assert?.(this.isAbortSignal(signal));
         assert?.(!this.isReadableStreamLocked(source));
         assert?.(!this.isWritableStreamLocked(dest));
         const reader = this.acquireReadableStreamDefaultReader(source);
         const writer = this.acquireWritableStreamDefaultWriter(dest);
         source[slots.disturbed] = true;
-        const shuttingDown = false;
+        let shuttingDown = false;
+        let currentWrite = Promise.resolve();
         const pipeRequest = this.createAsync();
         if (signal != null) {
-            const abortAlgorithm = () => {
-                const error = this.createNewAbortError('Pipe operation was aborted');
-                const actions = [];
-                if (!preventAbort) {
-                    actions.push(async () => {
-                        if (dest.state === 'writable') {
-                            return this.writableStreamAbort(dest, error);
-                        }
-                    });
-                }
-                if (!preventCancel) {
-                    actions.push(async () => {
-                        if (source.state === 'readable') {
-                            return this.readableStreamCancel(source, error);
-                        }
-                    });
-                }
-                this.shutdownWithAction(actions, error);
-            };
             if (signal.aborted) {
                 abortAlgorithm();
                 return pipeRequest.promise;
@@ -1162,7 +1117,8 @@ const spec = {
             signal.addEventListener('abort', abortAlgorithm, { once: true });
         }
 
-        this.readableStreamPipeIsOrBecomesErrored(source, reader[slots.closedAsync].promise, storedError => {
+        // Errors on readable stream should be propagated to the writable stream (forward)
+        isOrBecomesErrored(source, reader[slots.closedAsync].promise, storedError => {
             if (preventAbort) {
                 shutdown(true, storedError);
             } else {
@@ -1170,7 +1126,158 @@ const spec = {
             }
         });
 
+        // Errors on writable stream should be propagated to readable stream (backward)
+        isOrBecomesErrored(dest, writer[slots.closedAsync].promise, storedError => {
+            if (preventCancel) {
+                shutdown();
+            } else {
+                shutdownWithAction(() => this.readableStreamCancel(source, storedError), true, storedError);
+            }
+        });
+
+        // Propagate closing forward
+        isOrBecomesClosed(source, reader[slots.closedAsync].promise, () => {
+            if (preventClose) {
+                shutdown();
+            } else {
+                shutdownWithAction(() => this.writableStreamDefaultWriterCloseWithErrorPropagation(writer));
+            }
+        });
+
+        writableStreamIsOrBecomesClosed(dest, writer[slots.closedAsync].promise, () => {
+            const destClosed = this.createNewTypeError('the destination writable stream closed before all data could be piped to it');
+            if (preventCancel) {
+                shutdown(true, destClosed);
+            } else {
+                shutdownWithAction(() => this.writableStreamDefaultWriterCloseWithErrorPropagation(writer));
+            }
+        });
+
+        this.promiseIsHandled(pipeLoop());
+
         return pipeRequest.promise;
+
+        function isOrBecomesErrored(stream, promise, action) {
+            if (stream[slots.state] === 'errored') {
+                action(stream[slots.storedError]);
+            } else {
+                promise.catch(action);
+            }
+        }
+
+        function isOrBecomesClosed(stream, promise, action) {
+            if (stream[slots.state] === 'closed') {
+                action();
+            } else {
+                promise.then(action);
+            }
+        }
+
+        function writableStreamIsOrBecomesClosed(stream, promise, action) {
+            if (spec.writableStreamCloseQueuedOrInFlight(stream) || stream[slots.state] === 'closed') {
+                action();
+            } else {
+                promise.then(action);
+            }
+        }
+
+        function shutdown(isError, error) {
+            if (shuttingDown) {
+                return;
+            }
+            shuttingDown = true;
+            if (dest[slots.state] === 'writable' && !spec.writableStreamCloseQueuedOrInFlight(dest)) {
+                waitForWritesToFinish().then(() => {
+                    finalize(isError, error);
+                });
+            } else {
+                finalize(isError, error);
+            }
+        }
+
+        function shutdownWithAction(action, originalIsError, originalError) {
+            if (shuttingDown) {
+                return;
+            }
+            shuttingDown = true;
+
+            if (dest[slots.state] === 'writable' && !spec.writableStreamCloseQueuedOrInFlight(dest)) {
+                waitForWritesToFinish().then(doTheRest);
+            } else {
+                doTheRest();
+            }
+
+            function doTheRest() {
+                action().then(
+                    () => finalize(originalIsError, originalError),
+                    newError => finalize(true, newError)
+                );
+            }
+        }
+
+        function finalize(isError, error) {
+            spec.writableStreamDefaultWriterRelease(writer);
+            spec.readableStreamReaderGenericRelease(reader);
+            if (signal != null) {
+                signal.removeEventListener('abort', abortAlgorithm);
+            }
+            if (isError) {
+                pipeRequest.reject(error);
+            } else {
+                pipeRequest.resolve();
+            }
+        }
+
+        function abortAlgorithm() {
+            const error = spec.createNewAbortError('Pipe operation was aborted');
+            const actions = [];
+            if (!preventAbort) {
+                actions.push(async () => {
+                    if (dest.state === 'writable') {
+                        return spec.writableStreamAbort(dest, error);
+                    }
+                });
+            }
+            if (!preventCancel) {
+                actions.push(async () => {
+                    if (source.state === 'readable') {
+                        return spec.readableStreamCancel(source, error);
+                    }
+                });
+            }
+            shutdownWithAction(async () => Promise.all(actions.map(action => action())), true, error);
+        };
+
+        function waitForWritesToFinish() {
+            // currentWriteAsync is reassigned on each pipeStep()
+            // Calling waitForWritesToFinish() wait for the currentWriteAsync,
+            // if that waiting result in reassignment, we are waiting for the reassigned as well.
+            const oldCurrentWrite = currentWrite;
+            return oldCurrentWrite.then(() => oldCurrentWrite !== currentWrite ? waitForWritesToFinish() : undefined);
+        }
+
+        async function pipeLoop() {
+            while (await pipeStep());
+        }
+
+        async function pipeStep() {
+            if (shuttingDown) {
+                return true;
+            }
+            writer[slots.readyAsync].promise.then(() => {
+                return new Promise((resolve, reject) => {
+                    spec.readableStreamDefaultReaderRead(reader, {
+                        chunkSteps: chunk => {
+                            currentWrite = spec.writableStreamDefaultWriterWrite(writer, chunk);
+                            this.promiseIsHandled(currentWrite);
+                            resolve(false);
+                        },
+                        closeSteps: () => resolve(true),
+                        errorSteps: reject
+                    });
+                });
+            });
+        }
     },
     readableStreamReaderGenericCancel(reader, reason) {
         const stream = reader[slots.stream];
@@ -1728,6 +1835,19 @@ const spec = {
         assert?.(stream != null);
         return this.writableStreamClose(stream);
     },
+    async writableStreamDefaultWriterCloseWithErrorPropagation(writer) {
+        const stream = writer[slots.stream];
+        assert?.(stream != null);
+        const state = stream[slots.state];
+        if (this.writableStreamCloseQueuedOrInFlight(stream) || state === 'closed') {
+            return;
+        }
+        if (state === 'errored') {
+            throw stream[slots.storedError];
+        }
+        assert?.(state === 'writable' || state === 'erroring');
+        return this.writableStreamDefaultWriterClose(writer);
+    },
     writableStreamDefaultWriterEnsureClosedPromiseRejected(writer, error) {
         if (writer[slots.closedAsync].reject != null) {
             writer[slots.closedAsync].reject(error);
@@ -1933,5 +2053,13 @@ typedArrayTable.set(BigInt64Array.prototype, BigInt64Array);
 typedArrayTable.set(BigUint64Array.prototype, BigUint64Array);
 typedArrayTable.set(Float32Array.prototype, Float32Array);
 typedArrayTable.set(Float64Array.prototype, Float64Array);
+
+spec.byteLengthQueuingStrategySizeFunction = function size(chunk) {
+    return chunk.byteLength;
+};
+
+spec.countQueuingStrategySizeFunction = function size(chunk) {
+    return chunk.byteLength;
+};
 
 export default spec;

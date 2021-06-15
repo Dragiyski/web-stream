@@ -17,6 +17,7 @@ export default {
     errorSteps: Symbol('errorSteps'),
     finished: Symbol('finished'),
     flushAlgorithm: Symbol('flushAlgorithm'),
+    highWaterMark: Symbol('highWaterMark'),
     inFlightWriteRequest: Symbol('inFlightWriteRequest'),
     inFlightCloseRequest: Symbol('inFlightCloseRequest'),
     pendingAbortRequest: Symbol('pendingAbortRequest'),

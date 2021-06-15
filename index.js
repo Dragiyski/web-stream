@@ -543,7 +543,43 @@ export class TransformStreamDefaultController {
 }
 
 export class ByteLengthQueuingStrategy {
+    constructor(init) {
+        if (init == null || init !== Object(init)) {
+            throw spec.createNewTypeError('Invalid parameter 1: expected an object');
+        }
+        const highWaterMark = Number(init.highWaterMark);
+        if (Number.isNaN(highWaterMark) || highWaterMark < 0) {
+            throw spec.createNewRangeError('Invalid highWaterMark: expected non-negative number');
+        }
+        this[slots.highWaterMark] = highWaterMark;
+    }
+
+    get highWaterMark() {
+        return this[slots.highWaterMark];
+    }
+
+    get size() {
+        return spec.byteLengthQueuingStrategySizeFunction;
+    }
 }
 
 export class CountQueuingStrategy {
+    constructor(init) {
+        if (init == null || init !== Object(init)) {
+            throw spec.createNewTypeError('Invalid parameter 1: expected an object');
+        }
+        const highWaterMark = Number(init.highWaterMark);
+        if (Number.isNaN(highWaterMark) || highWaterMark < 0) {
+            throw spec.createNewRangeError('Invalid highWaterMark: expected non-negative number');
+        }
+        this[slots.highWaterMark] = highWaterMark;
+    }
+
+    get highWaterMark() {
+        return this[slots.highWaterMark];
+    }
+
+    get size() {
+        return spec.countQueuingStrategySizeFunction;
+    }
 }
