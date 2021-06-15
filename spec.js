@@ -83,7 +83,7 @@ const spec = {
             object.reject = reject;
         });
         object.promise.finally(() => {
-            object.fulfill = object.fulfill = null;
+            object.fulfill = object.reject = null;
         });
         return object;
     },
@@ -751,7 +751,7 @@ const spec = {
                 configurable: true,
                 writable: true,
                 value: function next() {
-                    return spec.readableStreamAsyncIteratorNext(stream, this);
+                    return spec.readableStreamAsyncIteratorNext(this);
                 }
             },
             return: {
@@ -768,12 +768,12 @@ const spec = {
         iterator[slots.finished] = false;
         return iterator;
     },
-    readableStreamAsyncIteratorNext(stream, iterator) {
+    readableStreamAsyncIteratorNext(iterator) {
         const nextSteps = async () => {
             if (iterator[slots.finished]) {
                 return { value: undefined, done: true };
             }
-            return this.readableStreamAsyncIteratorNextStep(stream, iterator).then(result => {
+            return this.readableStreamAsyncIteratorNextStep(iterator).then(result => {
                 iterator[slots.pendingIteration] = null;
                 if (result.done) {
                     iterator[slots.finished] = true;
@@ -790,7 +790,7 @@ const spec = {
             : nextSteps();
         return iterator[slots.pendingIteration];
     },
-    async readableStreamAsyncIteratorNextStep(stream, iterator) {
+    async readableStreamAsyncIteratorNextStep(iterator) {
         const reader = iterator[slots.reader];
         if (reader[slots.stream] == null) {
             throw this.createNewTypeError('Cannot get the next iteration result once the reader has been released');
@@ -808,6 +808,7 @@ const spec = {
                 readRequest.reject(e);
             }
         });
+        this.readableStreamDefaultReaderRead(reader, readRequest);
         return readRequest.promise;
     },
     readableStreamAsyncIteratorReturn(stream, iterator, value) {
@@ -1288,14 +1289,13 @@ const spec = {
         reader[slots.stream] = stream;
         stream[slots.reader] = reader;
         if (stream[slots.state] === 'readable') {
-            const task = this.createAsync();
-            reader[slots.closedAsync] = task;
+            reader[slots.closedAsync] = this.createAsync();
         } else if (stream[slots.state] === 'closed') {
-            stream[slots.closedAsync] = this.createAsyncReturn();
+            reader[slots.closedAsync] = this.createAsyncReturn();
         } else {
             assert?.(stream[slots.state] === 'errored');
-            stream[slots.closedAsync] = this.createAsyncThrow(stream[slots.storedError]);
-            this.promiseIsHandled(stream[slots.closedAsync].promise);
+            reader[slots.closedAsync] = this.createAsyncThrow(stream[slots.storedError]);
+            this.promiseIsHandled(reader[slots.closedAsync].promise);
         }
     },
     readableStreamReaderGenericRelease(reader) {
@@ -1680,15 +1680,15 @@ const spec = {
         }
         assert?.(state === 'writable' || state === 'erroring');
         assert?.(!this.writableStreamCloseQueuedOrInFlight(stream));
-        const closeAsync = this.createAsync();
-        stream[slots.closedAsync] = closeAsync;
+        const closeRequest = this.createAsync();
+        stream[slots.closeRequest] = closeRequest;
         const writer = stream[slots.writer];
         if (writer != null && stream[slots.backpressure] && state === 'writable') {
             assert?.(typeof writer[slots.readyAsync]?.fulfill === 'function');
             writer[slots.readyAsync].fulfill();
         }
         this.writableStreamDefaultControllerClose(stream[slots.controller]);
-        return closeAsync.promise;
+        return closeRequest.promise;
     },
     writableStreamConstruct(stream, sink = null, strategy = {}) {
         const sinkDict = this.makeUnderlyingSinkDict(sink);
